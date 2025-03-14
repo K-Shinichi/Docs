@@ -1,0 +1,87 @@
+In a minimal Yocto image (such as core-image-minimal), traditional SysV init scripts (/etc/init.d/) might not be available because the default init system is usually systemd or a very minimal init system.
+
+Solutions:
+
+1. Using systemd (Recommended)
+
+If your Yocto build includes systemd, the best way to add a startup script is to create a systemd service.
+
+Create a recipe (my-startup-script.bb)
+Place the following in meta-my-layer/recipes-core/my-startup-script/my-startup-script.bb:
+
+SUMMARY = "Custom startup script"
+SECTION = "base"
+LICENSE = "CLOSED"
+FILES_${PN} = "${bindir}/my-startup.sh ${systemd_unitdir}/system/my-startup.service"
+
+inherit systemd
+
+SRC_URI = "file://my-startup.sh \
+           file://my-startup.service"
+
+do_install() {
+    install -d ${D}${bindir}
+    install -m 0755 ${WORKDIR}/my-startup.sh ${D}${bindir}/my-startup.sh
+
+    install -d ${D}${systemd_unitdir}/system
+    install -m 0644 ${WORKDIR}/my-startup.service ${D}${systemd_unitdir}/system/my-startup.service
+}
+
+SYSTEMD_SERVICE_${PN} = "my-startup.service"
+
+Create the startup script (my-startup.sh)
+Inside meta-my-layer/recipes-core/my-startup-script/files/my-startup.sh:
+
+#!/bin/sh
+echo "Hello, Yocto!" > /tmp/startup.log
+
+Create the systemd service (my-startup.service)
+Inside meta-my-layer/recipes-core/my-startup-script/files/my-startup.service:
+
+[Unit]
+Description=My Custom Startup Script
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/my-startup.sh
+Type=oneshot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+
+Add the package to your image
+Modify your image recipe (core-image-minimal.bbappend):
+
+IMAGE_INSTALL:append = " my-startup-script"
+
+
+2. Using rc.local (If Available)
+
+Some Yocto configurations include /etc/rc.local. If it exists, you can simply modify it:
+
+#!/bin/sh
+echo "Startup script running!" > /tmp/startup.log
+exit 0
+
+Make sure it has execution permissions:
+
+chmod +x /etc/rc.local
+
+3. Using inittab (For BusyBox Init)
+
+If your system uses BusyBox as the init system, you can modify /etc/inittab:
+
+::sysinit:/bin/sh /usr/bin/my-startup.sh
+
+Conclusion:
+
+If using systemd: Create a systemd service (preferred method).
+
+If /etc/rc.local exists: Add your script there.
+
+If using BusyBox init: Modify /etc/inittab.
+
+
+Let me know if you need more details!
+
