@@ -1,0 +1,662 @@
+o add a persistent configuration partition slot to your RAUC (Robust Auto-Update Controller) setup in Yocto, you'll need to modify your RAUC bundle configuration and Yocto partitioning setup. Here’s a structured guide:
+1. Define the New Partition in WIC (Yocto)
+
+In Yocto, you define partition layouts using WIC (Writable Image Creator). You'll need to modify or create a WKS (WIC kickstart) file.
+
+    Locate your existing .wks file (typically in meta-your-layer/wic/).
+    Add a new persistent partition entry.
+
+Example WKS file (custom_image.wks):
+
+part /boot --source bootimg-partition --fstype=vfat --label boot --size 64M
+part / --source rootfs --fstype=ext4 --label rootfs --size 512M
+part /config --source rawcopy --fstype=ext4 --label config --size=50M --align 4096
+
+    The config partition is added as an ext4 filesystem and marked with a label.
+    --source rawcopy ensures the partition is empty but reserved.
+    --align 4096 ensures alignment for performance.
+
+2. Modify RAUC Configuration to Include the Config Slot
+
+RAUC uses a system.conf file to define slots (partitions). Modify it to include your new partition.
+Example system.conf:
+
+[system]
+compatible=mydevice
+bootloader=grub
+
+[slot.rootfs.0]
+device=/dev/mmcblk0p2
+type=ext4
+bootname=A
+
+[slot.rootfs.1]
+device=/dev/mmcblk0p3
+type=ext4
+bootname=B
+
+[slot.config]
+device=/dev/mmcblk0p4
+type=ext4
+read-only=false
+
+    device=/dev/mmcblk0p4 → Refers to the new persistent configuration partition.
+    read-only=false → Allows writing config updates.
+
+3. Ensure Yocto Recognizes the New Partition
+
+Modify the machine configuration in Yocto (meta-your-layer/conf/machine/yourmachine.conf) to include the new partition.
+
+Example:
+
+WKS_FILE = "custom_image.wks"
+
+Ensure your image recipe includes the WIC configuration:
+
+IMAGE_FSTYPES += "wic"
+WKS_FILE_DEPENDS += "mtools dosfstools e2fsprogs-native"
+
+4. Format and Mount the Partition at Boot
+
+If the partition is not formatted at first boot, add a systemd service to check and format it.
+Create a systemd service:
+
+Create /etc/systemd/system/config-format.service:
+
+[Unit]
+Description=Format Config Partition if needed
+ConditionPathExists=!/mnt/config
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c "mkfs.ext4 -L config /dev/mmcblk0p4 && mkdir -p /mnt/config && mount -t ext4 /dev/mmcblk0p4 /mnt/config"
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+
+Then, enable it:
+
+systemctl enable config-format.service
+
+This ensures:
+
+    If the partition is missing or unformatted, it gets formatted.
+    It gets mounted to /mnt/config.
+
+5. Rebuild Yocto and Deploy
+
+Now, rebuild your Yocto image:
+
+bitbake core-image-minimal
+
+Then, flash the new image to your device.
+Verification
+
+    Boot the device and check if /mnt/config exists:
+
+lsblk
+mount | grep config
+
+Check RAUC slots:
+
+    rauc status
+
+Next Steps
+
+    If you want RAUC to store updates in /mnt/config, modify RAUC hooks to store metadata in this partition.
+    You can sync configuration files (rauc.keyring, custom settings) into this partition and reference them at boot.
+
+Let me know if you need adjustments for your specific setup! 🚀
+You said:
+yes do next steps
+ChatGPT said:
+Next Steps: Storing RAUC Metadata in the Persistent Partition
+
+Now that we have successfully added a persistent configuration partition, the next step is to configure RAUC to use this partition for storing update metadata, logs, and configuration files.
+1. Modify RAUC to Use the Persistent Partition
+
+By default, RAUC stores metadata (e.g., installation logs, status information) in /etc/rauc or other system directories, which might get lost on an update. Instead, we’ll redirect this data to the persistent /mnt/config partition.
+Modify RAUC Configuration in Yocto
+
+Edit the RAUC system.conf file:
+
+[system]
+compatible=mydevice
+bootloader=grub
+
+[slot.rootfs.0]
+device=/dev/mmcblk0p2
+type=ext4
+bootname=A
+
+[slot.rootfs.1]
+device=/dev/mmcblk0p3
+type=ext4
+bootname=B
+
+[slot.config]
+device=/dev/mmcblk0p4
+type=ext4
+read-only=false
+mountpoint=/mnt/config
+
+    We explicitly set mountpoint=/mnt/config so RAUC knows where to look.
+
+2. Move RAUC Metadata to the Config Partition
+
+We'll move RAUC's keyring and status files to /mnt/config so they persist across updates.
+Modify RAUC's Keyring Location
+
+RAUC uses a keyring to verify updates. Move it to /mnt/config/rauc/ and update its location.
+
+    Move the keyring file:
+
+mkdir -p /mnt/config/rauc
+mv /etc/rauc/keyring.pem /mnt/config/rauc/keyring.pem
+
+Modify the RAUC service file to reference the new location: Edit /etc/systemd/system/rauc.service (or wherever RAUC is configured) and add:
+
+[Service]
+Environment=RAUC_KEYRING_PATH=/mnt/config/rauc/keyring.pem
+
+Then reload systemd:
+
+    systemctl daemon-reload
+    systemctl restart rauc
+
+Modify RAUC Status File Location
+
+By default, RAUC keeps a status file that tracks updates. We’ll redirect it to /mnt/config/rauc/status.json:
+
+    Create the directory:
+
+mkdir -p /mnt/config/rauc
+
+Update RAUC’s configuration:
+
+[system]
+statusfile=/mnt/config/rauc/status.json
+
+Copy existing status file:
+
+cp /var/lib/rauc/status.json /mnt/config/rauc/status.json
+
+Ensure the file is used correctly:
+
+    export RAUC_STATUSFILE=/mnt/config/rauc/status.json
+
+3. Modify Yocto to Automatically Mount the Config Partition
+
+Ensure the config partition is automatically mounted at /mnt/config on boot.
+
+    Edit /etc/fstab:
+
+echo "/dev/mmcblk0p4 /mnt/config ext4 defaults 0 2" >> /etc/fstab
+
+Verify the mount:
+
+    mount | grep config
+
+4. Modify Yocto Recipes to Include the Config Partition Setup
+
+Since we need this setup in every build, modify Yocto recipes.
+Create a Custom Yocto Recipe
+
+Create meta-your-layer/recipes-core/rauc-config/rauc-config.bb:
+
+DESCRIPTION = "RAUC Persistent Config Partition Setup"
+
+inherit systemd
+
+SRC_URI = "file://config-setup.sh \
+           file://rauc.service"
+
+S = "${WORKDIR}"
+
+do_install() {
+    install -d ${D}/etc/systemd/system/
+    install -m 0755 ${WORKDIR}/config-setup.sh ${D}/etc/init.d/
+    install -m 0644 ${WORKDIR}/rauc.service ${D}/etc/systemd/system/
+
+    install -d ${D}/mnt/config/rauc
+    echo "/dev/mmcblk0p4 /mnt/config ext4 defaults 0 2" >> ${D}/etc/fstab
+}
+
+FILES_${PN} += "/etc/systemd/system/rauc.service /etc/init.d/config-setup.sh /mnt/config/rauc"
+
+    This recipe ensures the RAUC keyring and status file are set up properly.
+    It also adds an init script (config-setup.sh) to prepare the config partition.
+
+5. Validate the Setup
+
+After building and deploying your updated Yocto image, check:
+
+    Ensure the config partition is mounted:
+
+mount | grep config
+
+Check RAUC status file:
+
+cat /mnt/config/rauc/status.json
+
+Run RAUC status check:
+
+    rauc status
+
+    It should now reference /mnt/config/rauc/status.json.
+
+6. Rebuild and Deploy the Yocto Image
+
+Once all modifications are done, rebuild and flash your image:
+
+bitbake core-image-minimal
+
+Summary of Changes
+
+✅ Added a persistent partition (/mnt/config) in WIC.
+✅ Configured RAUC to store metadata (keyring & status) in /mnt/config.
+✅ Modified Yocto recipes to auto-mount /mnt/config.
+✅ Updated RAUC service to use new paths.
+✅ Validated the setup with rauc status.
+
+Now, your RAUC setup is fully persistent across updates. Let me know if you need further refinements! 🚀
+You said:
+what is there in config-setup.sh
+ChatGPT said:
+
+The config-setup.sh script ensures that the persistent configuration partition (/mnt/config) is properly formatted and mounted at boot. Here’s what it should contain:
+config-setup.sh
+
+#!/bin/sh
+
+CONFIG_PART="/dev/mmcblk0p4"
+MOUNT_POINT="/mnt/config"
+FS_TYPE="ext4"
+
+echo "Checking if ${CONFIG_PART} is available..."
+
+# Ensure the partition exists
+if [ ! -b "$CONFIG_PART" ]; then
+    echo "Error: Configuration partition $CONFIG_PART not found!"
+    exit 1
+fi
+
+# Check if the partition is already mounted
+if mount | grep -q "$MOUNT_POINT"; then
+    echo "Configuration partition already mounted."
+    exit 0
+fi
+
+# Create the mount point if it doesn't exist
+if [ ! -d "$MOUNT_POINT" ]; then
+    echo "Creating mount point at $MOUNT_POINT..."
+    mkdir -p "$MOUNT_POINT"
+fi
+
+# Check if the partition is formatted
+if ! blkid "$CONFIG_PART" | grep -q "$FS_TYPE"; then
+    echo "Formatting configuration partition as $FS_TYPE..."
+    mkfs.$FS_TYPE -L config "$CONFIG_PART"
+fi
+
+# Mount the partition
+echo "Mounting $CONFIG_PART to $MOUNT_POINT..."
+mount -t $FS_TYPE "$CONFIG_PART" "$MOUNT_POINT"
+
+# Ensure the partition is automatically mounted on reboot
+if ! grep -q "$CONFIG_PART" /etc/fstab; then
+    echo "$CONFIG_PART  $MOUNT_POINT  $FS_TYPE  defaults  0  2" >> /etc/fstab
+fi
+
+echo "Configuration partition setup complete."
+exit 0
+
+What This Script Does
+
+✅ Checks if the config partition (/dev/mmcblk0p4) exists.
+✅ Creates the mount point (/mnt/config) if it doesn’t exist.
+✅ Formats the partition as ext4 if it is unformatted.
+✅ Mounts the partition.
+✅ Ensures it is auto-mounted by adding it to /etc/fstab.
+How to Integrate It into Yocto
+
+Add this script to your Yocto recipe (rauc-config.bb) so it gets installed in the final image.
+
+Modify meta-your-layer/recipes-core/rauc-config/rauc-config.bb:
+
+SRC_URI += "file://config-setup.sh"
+
+do_install() {
+    install -m 0755 ${WORKDIR}/config-setup.sh ${D}/etc/init.d/config-setup.sh
+}
+
+FILES_${PN} += "/etc/init.d/config-setup.sh"
+
+Ensure it runs at startup:
+
+update-rc.d config-setup.sh defaults
+
+Testing the Script
+
+After flashing the new Yocto image:
+
+lsblk
+mount | grep config
+cat /etc/fstab
+
+If /mnt/config is properly mounted and listed in /etc/fstab, everything is working!
+
+Let me know if you need any refinements! 🚀
+You said:
+but if you formt it it will lose all persistant data ?
+ChatGPT said:
+
+You're absolutely right! If we format the partition unconditionally, it will erase all persistent data. Instead, we should only format it if it's not already formatted. Here's how to modify the script to preserve existing data:
+Updated config-setup.sh
+
+#!/bin/sh
+
+CONFIG_PART="/dev/mmcblk0p4"
+MOUNT_POINT="/mnt/config"
+FS_TYPE="ext4"
+
+echo "Checking if ${CONFIG_PART} is available..."
+
+# Ensure the partition exists
+if [ ! -b "$CONFIG_PART" ]; then
+    echo "Error: Configuration partition $CONFIG_PART not found!"
+    exit 1
+fi
+
+# Check if the partition is already mounted
+if mount | grep -q "$MOUNT_POINT"; then
+    echo "Configuration partition already mounted."
+    exit 0
+fi
+
+# Create the mount point if it doesn't exist
+if [ ! -d "$MOUNT_POINT" ]; then
+    echo "Creating mount point at $MOUNT_POINT..."
+    mkdir -p "$MOUNT_POINT"
+fi
+
+# Check if the partition is formatted
+if ! blkid "$CONFIG_PART" | grep -q "$FS_TYPE"; then
+    echo "Warning: Configuration partition is not formatted!"
+    echo "Skipping formatting to avoid data loss."
+else
+    echo "Configuration partition is already formatted."
+fi
+
+# Mount the partition
+echo "Mounting $CONFIG_PART to $MOUNT_POINT..."
+mount -t $FS_TYPE "$CONFIG_PART" "$MOUNT_POINT"
+
+# Ensure the partition is automatically mounted on reboot
+if ! grep -q "$CONFIG_PART" /etc/fstab; then
+    echo "$CONFIG_PART  $MOUNT_POINT  $FS_TYPE  defaults  0  2" >> /etc/fstab
+fi
+
+echo "Configuration partition setup complete."
+exit 0
+
+What Changed?
+
+✅ It checks if the partition is already formatted before attempting to format it.
+✅ If the partition is not formatted, it warns the user instead of formatting automatically (to avoid data loss).
+✅ Mounts the partition without modifying data.
+✅ Ensures it's auto-mounted on every boot.
+Behavior in Different Scenarios
+Scenario	Behavior
+Partition exists and is formatted	✅ Mounted without changes
+Partition exists but is not formatted	⚠️ Logs a warning, does NOT format
+Partition does not exist	❌ Logs an error and exits
+Partition is already mounted	✅ Skips unnecessary steps
+Next Steps
+
+    Replace your existing config-setup.sh with this version.
+    Deploy it in Yocto using the recipe we discussed earlier.
+    Rebuild and test.
+    Manually format the partition once if it's never been formatted using:
+
+    mkfs.ext4 -L config /dev/mmcblk0p4
+
+Now, your configuration partition will remain persistent across updates! 🚀
+Let me know if you need further tweaks!
+You said:
+why you need to formt it
+ChatGPT said:
+
+The formatting step is only necessary if the partition has never been formatted before. Without a valid filesystem, the partition cannot be mounted, and RAUC (or any other application) won’t be able to store data on it.
+Why Do We Need to Format the Partition?
+
+    Brand New Devices or First Boot
+    If the partition is empty (raw flash or unformatted block storage), it must be formatted with a valid filesystem (e.g., ext4) before it can be mounted and used.
+
+    Prevents Mounting Issues
+    If the partition is not formatted, attempting to mount it will result in an error like:
+
+    mount: wrong fs type, bad option, bad superblock on /dev/mmcblk0p4
+
+    Formatting ensures the partition is usable.
+
+    Ensures a Known Filesystem Type
+    If a device is being updated with a new Yocto image, but the existing partition was formatted with a different filesystem (e.g., vfat instead of ext4), formatting ensures compatibility with the new system.
+
+When Should We Avoid Formatting?
+
+⚠ We should NEVER format the partition if it already contains persistent data.
+To prevent accidental data loss, the script only formats the partition if it's completely unformatted.
+How to Check If the Partition Needs Formatting?
+
+Instead of formatting unconditionally, the script should check if a valid filesystem exists:
+Updated config-setup.sh (Final Version)
+
+#!/bin/sh
+
+CONFIG_PART="/dev/mmcblk0p4"
+MOUNT_POINT="/mnt/config"
+FS_TYPE="ext4"
+
+echo "Checking if ${CONFIG_PART} is available..."
+
+# Ensure the partition exists
+if [ ! -b "$CONFIG_PART" ]; then
+    echo "Error: Configuration partition $CONFIG_PART not found!"
+    exit 1
+fi
+
+# Check if the partition is already mounted
+if mount | grep -q "$MOUNT_POINT"; then
+    echo "Configuration partition already mounted."
+    exit 0
+fi
+
+# Create the mount point if it doesn't exist
+if [ ! -d "$MOUNT_POINT" ]; then
+    echo "Creating mount point at $MOUNT_POINT..."
+    mkdir -p "$MOUNT_POINT"
+fi
+
+# Check if the partition is formatted
+if blkid "$CONFIG_PART" | grep -q "$FS_TYPE"; then
+    echo "Configuration partition is already formatted."
+else
+    echo "Warning: Configuration partition is not formatted!"
+    echo "Formatting it now (only once)..."
+    mkfs.$FS_TYPE -L config "$CONFIG_PART"
+fi
+
+# Mount the partition
+echo "Mounting $CONFIG_PART to $MOUNT_POINT..."
+mount -t $FS_TYPE "$CONFIG_PART" "$MOUNT_POINT"
+
+# Ensure the partition is automatically mounted on reboot
+if ! grep -q "$CONFIG_PART" /etc/fstab; then
+    echo "$CONFIG_PART  $MOUNT_POINT  $FS_TYPE  defaults  0  2" >> /etc/fstab
+fi
+
+echo "Configuration partition setup complete."
+exit 0
+
+Final Behavior of the Script
+Scenario	Behavior
+Partition exists and is formatted	✅ Mounted without formatting
+Partition exists but is unformatted	⚠️ Formatted once, then mounted
+Partition does not exist	❌ Logs an error and exits
+Partition is already mounted	✅ Skips unnecessary steps
+How to Use This in Yocto
+
+    Deploy this script in Yocto (via recipe in meta-your-layer).
+    Manually format once if needed:
+
+mkfs.ext4 -L config /dev/mmcblk0p4
+
+Verify by rebooting and checking the mount:
+
+    lsblk
+    mount | grep config
+
+Summary
+
+✔ The script ensures the partition is formatted ONLY IF it’s unformatted.
+✔ Avoids accidental data loss while ensuring a valid filesystem exists.
+✔ Automatically mounts the partition and persists it via /etc/fstab.
+
+Now your RAUC persistent partition is fully operational and safe across updates! 🚀
+Let me know if you need any refinements!
+You said:
+i want the persistant config slot to store file configs for specific packages
+ChatGPT said:
+Storing Configuration Files for Specific Packages in the Persistent Partition (/mnt/config)
+
+Now that we have a persistent config partition (/mnt/config), we need to ensure that specific packages store their configuration files in this partition instead of the root filesystem (/etc/).
+1. Identify Package Configuration Files
+
+To persist configurations, we need to identify where each package stores its settings. Here are common locations:
+Package	Default Config Location
+RAUC	/etc/rauc/
+NetworkManager	/etc/NetworkManager/
+Systemd	/etc/systemd/
+SSH (OpenSSH)	/etc/ssh/
+Custom Apps	/etc/myapp/
+
+We will move these to /mnt/config/ and create symbolic links (symlinks).
+2. Move Configuration Files to /mnt/config
+
+The best way to do this is by modifying the Yocto recipe of each package to move its configuration files.
+
+For example, let’s assume we want to persist RAUC and NetworkManager configurations.
+Move RAUC Configurations
+
+Modify the RAUC recipe (meta-your-layer/recipes-core/rauc/rauc.bbappend):
+
+do_install_append() {
+    install -d ${D}/mnt/config/rauc
+    mv ${D}/etc/rauc/* ${D}/mnt/config/rauc/
+    ln -s /mnt/config/rauc/system.conf ${D}/etc/rauc/system.conf
+}
+
+🔹 What it does:
+
+    Moves RAUC configuration to /mnt/config/rauc/
+    Creates a symlink from /etc/rauc/system.conf to /mnt/config/rauc/system.conf
+
+Move NetworkManager Configurations
+
+Modify meta-your-layer/recipes-connectivity/networkmanager/networkmanager.bbappend:
+
+do_install_append() {
+    install -d ${D}/mnt/config/NetworkManager
+    mv ${D}/etc/NetworkManager/* ${D}/mnt/config/NetworkManager/
+    ln -s /mnt/config/NetworkManager/NetworkManager.conf ${D}/etc/NetworkManager/NetworkManager.conf
+}
+
+For Any Other Package
+
+Modify the .bbappend file for that package in Yocto and apply the same pattern:
+
+    Move config files to /mnt/config
+    Create symlinks back to /etc/
+
+3. Ensure Configuration Partition is Mounted Before Services Start
+
+To make sure services don’t start before /mnt/config is mounted, we need a systemd dependency.
+Modify Service Files
+
+For RAUC, update /etc/systemd/system/rauc.service:
+
+[Unit]
+After=local-fs.target mnt-config.mount
+Requires=mnt-config.mount
+
+[Service]
+Environment=RAUC_KEYRING_PATH=/mnt/config/rauc/keyring.pem
+ExecStart=/usr/bin/rauc status
+
+For NetworkManager, modify /etc/systemd/system/NetworkManager.service:
+
+[Unit]
+After=local-fs.target mnt-config.mount
+Requires=mnt-config.mount
+
+This ensures that these services only start after the config partition is mounted.
+4. Automatically Populate Configuration on First Boot
+
+If /mnt/config/ is empty on first boot, we need a script to populate default configurations.
+Create an Init Script
+
+File: meta-your-layer/recipes-core/base-files/base-files/init-config.sh
+
+#!/bin/sh
+
+CONFIG_DIR="/mnt/config"
+DEFAULT_CONFIG_DIR="/etc/default-config"
+
+# Ensure partition is mounted
+if ! mount | grep -q "$CONFIG_DIR"; then
+    echo "Error: Config partition is not mounted!"
+    exit 1
+fi
+
+# Copy default configs if missing
+for folder in rauc NetworkManager ssh; do
+    if [ ! -d "$CONFIG_DIR/$folder" ]; then
+        echo "Initializing config for $folder..."
+        mkdir -p "$CONFIG_DIR/$folder"
+        cp -r "$DEFAULT_CONFIG_DIR/$folder/"* "$CONFIG_DIR/$folder/"
+    fi
+done
+
+echo "Configuration setup complete."
+exit 0
+
+    This script copies default configs from /etc/default-config/ to /mnt/config/ if missing.
+    Add it to Yocto startup scripts:
+
+    update-rc.d init-config.sh defaults
+
+5. Rebuild and Test
+
+Now, rebuild your Yocto image and flash it:
+
+bitbake core-image-minimal
+
+After booting, check:
+
+ls -l /etc/rauc/system.conf
+ls -l /mnt/config/rauc/
+ls -l /etc/NetworkManager/NetworkManager.conf
+
+They should all be symlinks to /mnt/config/, meaning your configuration is now persistent! 🚀
+Final Summary
+
+✅ Configuration files are moved to /mnt/config/ to persist across updates.
+✅ Symlinks redirect from /etc/ to /mnt/config/ so applications find their configs.
+✅ Systemd ensures the partition is mounted before services start.
+✅ A startup script populates missing configs on first boot.
+
+Now, even after a RAUC update, your configurations remain untouched! 🎯
+Let me know if you need more refinements! 🚀
