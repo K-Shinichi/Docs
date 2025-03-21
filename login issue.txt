@@ -1,0 +1,650 @@
+It sounds like your board is booting, but the login process is failing. This could be caused by a variety of issues, including:
+Possible Issues & Solutions
+1. Check the Boot Arguments
+
+    The kernel might not be pointing to the correct root filesystem.
+    Run this command in U-Boot (if you have access):
+
+    printenv
+
+    Look for bootargs, and ensure the root= parameter is set to the correct partition where your Yocto rootfs is located.
+
+Example:
+
+root=/dev/mmcblk0p2 rw rootwait console=ttyS0,115200
+
+    If it’s incorrect, update it:
+
+    setenv bootargs 'root=/dev/mmcblk0p2 rw rootwait console=ttyS0,115200'
+    saveenv
+
+2. Verify the Root Filesystem Structure
+
+    Check if your Yocto rootfs is correctly populated.
+    If possible, mount the partition on another system and inspect:
+
+    ls /mnt/rootfs
+
+    It should contain standard Linux directories like /bin, /sbin, /lib, /etc, etc.
+    If it’s empty or incomplete, your Yocto rootfs might not have been properly installed.
+
+3. Check Login Mechanism
+
+    The getty service should be running for login.
+    Try booting in single-user mode:
+        In U-Boot, modify the kernel command line:
+
+        setenv bootargs 'root=/dev/mmcblk0p2 rw init=/bin/sh'
+        boot
+
+        If you get a shell, then your login system (e.g., PAM, shadow passwords) might be misconfigured.
+
+4. Ensure Correct Permissions on /etc/passwd and /etc/shadow
+
+    If you can access the rootfs, check:
+
+ls -l /etc/passwd /etc/shadow
+
+Expected permissions:
+
+    -rw-r--r-- 1 root root /etc/passwd
+    -rw------- 1 root root /etc/shadow
+
+    If they are missing or incorrect, recreate them.
+
+5. Check Kernel Compatibility with Rootfs
+
+    If you are using the Moxa FIT image’s kernel and a Yocto rootfs, there might be incompatibilities.
+    Try using a Yocto-built kernel with matching modules.
+
+6. Inspect Logs
+
+    If you get to a console but login still fails, check logs:
+
+    dmesg | grep -i error
+    journalctl -xb
+
+Next Steps
+
+If none of these work, can you provide:
+
+    The U-Boot logs
+    The kernel boot log (dmesg)
+    The error message when you try to login?
+
+This will help diagnose the exact issue.
+You said:
+there is no error when i login just the credentials are wrong and ieven added a new user via et shadow and passwd the same just it tell me warging poky ?
+ChatGPT said:
+
+If you're seeing "Warning: poky" when trying to log in and your credentials are being rejected despite modifying /etc/passwd and /etc/shadow, the issue could be related to Yocto's security mechanisms, PAM authentication, or shadow file mismatches. Let's troubleshoot systematically.
+Step 1: Check Root User Authentication
+
+Try logging in as root without a password:
+
+root
+
+    If it lets you in, your system might be configured for passwordless root login.
+    If it asks for a password but denies it, your /etc/shadow file might not be in sync.
+
+Step 2: Reset Passwords from U-Boot (Single-User Mode)
+
+If you have access to U-Boot, boot into single-user mode:
+
+    Interrupt U-Boot and modify the kernel boot arguments:
+
+setenv bootargs 'root=/dev/mmcblk0p2 rw init=/bin/sh'
+boot
+
+Once the system boots, remount the filesystem as read-write:
+
+mount -o remount,rw /
+
+Change the root password:
+
+passwd
+
+Restart:
+
+    exec /sbin/init
+
+Try logging in again.
+Step 3: Verify /etc/shadow and /etc/passwd
+
+Check their permissions:
+
+ls -l /etc/passwd /etc/shadow
+
+Expected:
+
+-rw-r--r-- 1 root root  /etc/passwd
+-rw------- 1 root root  /etc/shadow
+
+If incorrect:
+
+chmod 644 /etc/passwd
+chmod 600 /etc/shadow
+
+If you manually edited /etc/shadow, ensure the hash format is correct. You can reset a password by setting it to a known hash:
+
+openssl passwd -6 'newpassword'
+
+Then replace the root password field in /etc/shadow with the generated hash.
+Step 4: Disable PAM Temporarily
+
+If PAM is causing issues, you can disable it:
+
+    Edit /etc/nsswitch.conf and change:
+
+passwd: compat
+shadow: compat
+
+To:
+
+passwd: files
+shadow: files
+
+Remove PAM authentication (for debugging):
+
+    mv /etc/pam.d /etc/pam.d.bak
+
+    Reboot and try logging in again.
+
+Step 5: Check System Logs
+
+If the login prompt keeps rejecting credentials, check:
+
+cat /var/log/auth.log
+journalctl -xe
+
+Look for authentication-related errors.
+Step 6: Test with Another RootFS
+
+Try using another Yocto-based root filesystem (from core-image-minimal or core-image-full-cmdline) to see if it’s a problem with your current rootfs setup.
+Next Steps
+
+If login still fails, let me know:
+
+    What image recipe you used to build the rootfs?
+    What exact steps you took to modify /etc/shadow?
+    The exact message shown when login is rejected.
+
+This will help pinpoint the issue! 🚀
+You said:
+i used machine=am64xx-evm
+ChatGPT said:
+
+Since you used MACHINE=am64xx-evm, you are working with TI AM64xx-based boards using Yocto. Here’s how to troubleshoot your login issue:
+Step 1: Check Default Yocto Credentials
+
+Before anything, try logging in with the default credentials for Poky-based Yocto images:
+
+    Username: root
+    Password: (press Enter) → Many Yocto images allow root login without a password.
+
+If this works, your image has no password set, and you can configure users after login.
+Step 2: Check /etc/shadow Hash Format
+
+Since you manually modified /etc/shadow, check if the password hash is in a valid format.
+
+Run:
+
+cat /etc/shadow | grep root
+
+Expected format:
+
+root:$6$abc123...:19000:0:99999:7:::
+
+    If root has ! or *, authentication is disabled:
+
+root:!:19000:0:99999:7:::
+
+Fix it by generating a new password hash:
+
+    openssl passwd -6 'yourpassword'
+
+    Replace the root password in /etc/shadow with this hash.
+
+Step 3: Boot into Single-User Mode
+
+If login still fails, reset the password manually.
+
+    Interrupt U-Boot and enter bootargs:
+
+setenv bootargs 'root=/dev/mmcblk0p2 rw init=/bin/sh'
+boot
+
+Remount rootfs as read-write:
+
+mount -o remount,rw /
+
+Set a new password:
+
+passwd root
+
+Reboot:
+
+    exec /sbin/init
+
+Try logging in again.
+Step 4: Verify NSS and PAM Configuration
+
+Yocto-based systems sometimes have strict NSS/PAM settings. Check /etc/nsswitch.conf:
+
+cat /etc/nsswitch.conf | grep passwd
+
+Expected:
+
+passwd: files
+shadow: files
+
+If it shows compat, change it to files.
+
+Disable PAM (for debugging):
+
+mv /etc/pam.d /etc/pam.d.bak
+
+Reboot and try logging in.
+Step 5: Check Kernel Boot Logs
+
+If it still fails, check the logs:
+
+journalctl -xe
+dmesg | grep -i error
+
+Look for:
+
+    authentication failure
+    /etc/shadow file corruption
+    PAM errors
+
+Step 6: Test a Minimal RootFS
+
+If nothing works, try booting a known-good rootfs:
+
+    Download a reference rootfs for am64xx-evm:
+
+    wget https://software-dl.ti.com/processor-sdk-linux/esd/AM64X/latest/exports/tisdk-default-image-am64xx-evm.tar.xz
+
+    Extract it to your rootfs partition and reboot.
+
+Next Steps
+
+If login still fails, provide:
+
+    The exact message when login is rejected.
+    Output of:
+
+    ls -l /etc/passwd /etc/shadow
+    cat /etc/shadow | grep root
+    journalctl -xe | tail -20
+
+This will help pinpoint the issue. 🚀
+You said:
+when kernel launches there is no error
+ChatGPT said:
+
+If your kernel boots without errors but you cannot log in, let's systematically debug the issue.
+✅ Troubleshooting Login Issues on Yocto (AM64xx-EVM)
+🔍 Step 1: Check Default Yocto Credentials
+
+Try logging in with:
+
+    Username: root
+    Password: (just press Enter, no password)
+
+If this works, your system has no password set. You can configure one after logging in.
+🔍 Step 2: Boot into Single-User Mode
+
+If login still fails, reset the password.
+
+1️⃣ Interrupt U-Boot during boot:
+
+    Press any key when you see the U-Boot prompt.
+
+2️⃣ Modify boot arguments:
+
+setenv bootargs 'root=/dev/mmcblk0p2 rw init=/bin/sh'
+boot
+
+3️⃣ Remount rootfs as read/write:
+
+mount -o remount,rw /
+
+4️⃣ Set a new password:
+
+passwd root
+
+5️⃣ Reboot:
+
+exec /sbin/init
+
+Try logging in again.
+🔍 Step 3: Verify /etc/shadow
+
+If login still fails, check /etc/shadow:
+
+1️⃣ Boot into single-user mode (Step 2).
+2️⃣ Run:
+
+cat /etc/shadow | grep root
+
+You should see:
+
+root:$6$abc123...:19000:0:99999:7:::
+
+    If it contains ! or *, authentication is disabled:
+
+root:!:19000:0:99999:7:::
+
+Fix it:
+
+    openssl passwd -6 'yourpassword'
+
+    Copy the output and replace root:'s password field in /etc/shadow.
+
+3️⃣ Reboot and test login.
+🔍 Step 4: Check NSS Configuration
+
+1️⃣ Check /etc/nsswitch.conf:
+
+cat /etc/nsswitch.conf | grep passwd
+
+Expected:
+
+passwd: files
+shadow: files
+
+If it says compat, change it to files.
+
+2️⃣ Disable PAM authentication (debugging only):
+
+mv /etc/pam.d /etc/pam.d.bak
+
+Reboot and try logging in.
+🔍 Step 5: Check System Logs
+
+If login still fails, check logs:
+
+journalctl -xe | tail -20
+dmesg | grep -i error
+
+Look for:
+
+    Authentication errors
+    PAM failures
+    Filesystem corruption messages
+
+🔍 Step 6: Use a Known-Good RootFS
+
+If everything fails, test a reference rootfs:
+
+1️⃣ Download a verified rootfs:
+
+wget https://software-dl.ti.com/processor-sdk-linux/esd/AM64X/latest/exports/tisdk-default-image-am64xx-evm.tar.xz
+
+2️⃣ Extract it to your rootfs partition:
+
+tar -xvf tisdk-default-image-am64xx-evm.tar.xz -C /mnt/rootfs
+
+3️⃣ Reboot and try logging in.
+📌 Next Steps
+
+If the issue persists, provide:
+
+    Output of:
+
+    ls -l /etc/passwd /etc/shadow
+    cat /etc/shadow | grep root
+    journalctl -xe | tail -20
+
+    Exact error message when login fails.
+
+This will help pinpoint the problem. 🚀
+You said:
+the only message is warning poky
+ChatGPT said:
+
+If the only message you see is "Warning: poky" when attempting to log in, and your credentials are being rejected despite manually modifying /etc/shadow, this suggests a few possible causes:
+🔍 Possible Issues and Fixes
+✅ Step 1: Try Logging in Without a Password
+
+Since you are using a Yocto-based system (Poky), some images allow password-less login. Try:
+
+root
+
+(Just press Enter without typing a password)
+
+If this works, your image is set up to allow password-less root login, and you can configure a password later.
+✅ Step 2: Boot Into Single-User Mode and Reset Password
+
+If login fails, reset the password by booting into single-user mode.
+
+1️⃣ Interrupt U-Boot during startup
+(Press a key when you see the U-Boot prompt)
+
+2️⃣ Modify the kernel boot arguments:
+
+setenv bootargs 'root=/dev/mmcblk0p2 rw init=/bin/sh'
+boot
+
+3️⃣ Remount the root filesystem as read/write:
+
+mount -o remount,rw /
+
+4️⃣ Reset the root password:
+
+passwd root
+
+Enter a new password twice.
+
+5️⃣ Restart:
+
+exec /sbin/init
+
+Now, try logging in with the new password.
+✅ Step 3: Check /etc/shadow for Corruption
+
+If login still fails, check /etc/shadow:
+
+1️⃣ Boot into single-user mode (Step 2).
+2️⃣ Run:
+
+cat /etc/shadow | grep root
+
+Expected format:
+
+root:$6$abc123...:19000:0:99999:7:::
+
+    If you see ! or *, authentication is disabled:
+
+root:!:19000:0:99999:7:::
+
+Fix it by setting a new password:
+
+    openssl passwd -6 'yourpassword'
+
+    Replace the root password field in /etc/shadow with the output.
+
+3️⃣ Check file permissions:
+
+ls -l /etc/passwd /etc/shadow
+
+Expected:
+
+-rw-r--r-- 1 root root  /etc/passwd
+-rw------- 1 root root  /etc/shadow
+
+If permissions are incorrect:
+
+chmod 644 /etc/passwd
+chmod 600 /etc/shadow
+
+4️⃣ Reboot and test login.
+✅ Step 4: Check PAM and NSS Configuration
+
+If login is still failing:
+
+1️⃣ Check NSS configuration:
+
+cat /etc/nsswitch.conf | grep passwd
+
+Expected:
+
+passwd: files
+shadow: files
+
+    If it says compat, change it to files.
+
+2️⃣ Temporarily disable PAM (for debugging):
+
+mv /etc/pam.d /etc/pam.d.bak
+
+Reboot and try logging in again.
+✅ Step 5: Check System Logs
+
+If login is still rejected, check the logs:
+
+journalctl -xe | tail -20
+dmesg | grep -i error
+
+Look for:
+
+    Authentication failures
+    PAM errors
+    Filesystem corruption messages
+
+✅ Step 6: Use a Known-Good RootFS
+
+If everything else fails, test a clean Yocto rootfs.
+
+1️⃣ Download a verified rootfs:
+
+wget https://software-dl.ti.com/processor-sdk-linux/esd/AM64X/latest/exports/tisdk-default-image-am64xx-evm.tar.xz
+
+2️⃣ Extract it to your rootfs partition:
+
+tar -xvf tisdk-default-image-am64xx-evm.tar.xz -C /mnt/rootfs
+
+3️⃣ Reboot and test login.
+📌 Next Steps
+
+If login still fails, provide:
+
+    Exact error message when login is rejected
+    Output of:
+
+    ls -l /etc/passwd /etc/shadow
+    cat /etc/shadow | grep root
+    journalctl -xe | tail -20
+
+This will help pinpoint the issue. 🚀
+You said:
+is there other solution
+ChatGPT said:
+
+Yes! Since you’re seeing "Warning: poky" and login is failing, but there are no kernel errors, here are alternative solutions beyond resetting passwords.
+🔎 Alternative Solutions for Yocto Login Issue
+✅ Solution 1: Switch to a Different Console
+
+Sometimes, Yocto images boot into the wrong console. Try switching terminals:
+
+1️⃣ Check available terminals:
+Press Ctrl + Alt + F1 to F6 to cycle through available TTYs.
+
+2️⃣ If you see a login prompt on another terminal, try logging in with:
+
+root
+
+(Press Enter if no password is required)
+✅ Solution 2: Force Console on Serial (for Debugging)
+
+If you're using a serial console, try specifying it in U-Boot:
+
+1️⃣ Interrupt U-Boot
+
+    Press a key during boot.
+
+2️⃣ Set correct console device (example for AM64xx-EVM):
+
+setenv bootargs 'console=ttyS2,115200 root=/dev/mmcblk0p2 rw rootwait'
+saveenv
+boot
+
+3️⃣ Try logging in again.
+✅ Solution 3: Manually Start getty Service
+
+Yocto systems rely on getty for login. If it's not running, you can't log in.
+
+1️⃣ Boot into single-user mode (see previous steps).
+2️⃣ Check if getty is running:
+
+ps aux | grep getty
+
+    If no getty process appears, start it manually:
+
+/sbin/getty -L 115200 ttyS2 vt100
+
+If this works, enable it permanently:
+
+    systemctl enable serial-getty@ttyS2.service
+    reboot
+
+✅ Solution 4: Fix inittab (SysV Init)
+
+If getty isn’t running, inittab might be misconfigured.
+
+1️⃣ Boot into single-user mode.
+2️⃣ Check /etc/inittab:
+
+cat /etc/inittab
+
+3️⃣ Ensure there’s a line like:
+
+S2:12345:respawn:/sbin/getty -L 115200 ttyS2 vt100
+
+4️⃣ Save and reboot.
+✅ Solution 5: Use a Debug Shell (emergency.target)
+
+If login keeps failing, force the system into emergency mode to debug:
+
+1️⃣ Reboot and interrupt U-Boot.
+2️⃣ Modify kernel boot args:
+
+setenv bootargs 'root=/dev/mmcblk0p2 rw systemd.unit=emergency.target'
+boot
+
+3️⃣ This boots directly into a root shell.
+4️⃣ Fix login issues (check /etc/shadow, /etc/passwd, etc.).
+5️⃣ Reboot normally.
+✅ Solution 6: Reinstall shadow-utils
+
+If password authentication is failing due to a missing/broken passwd utility:
+
+1️⃣ Boot into single-user mode.
+2️⃣ Reinstall shadow-utils:
+
+opkg update
+opkg install shadow
+
+3️⃣ Reset the root password:
+
+passwd root
+
+4️⃣ Reboot.
+🚀 Final Steps
+
+If none of these work, provide:
+
+    Output of:
+
+    ps aux | grep getty
+    ls -l /etc/passwd /etc/shadow
+    cat /etc/inittab
+    dmesg | grep -i error
+    journalctl -xe | tail -20
+
+    Exact login error message (besides "Warning: poky").
+
+This will help pinpoint the issue! 🚀
+
