@@ -1,0 +1,648 @@
+
+Great! Replacing the eMMC bootloader on the Moxa UC-1222A with your own Yocto-built U-Boot is doable, but it’s risky — you need to make sure you have a solid recovery method (e.g., boot from SD card or UART recovery) in case something goes wrong.
+
+Here’s a step-by-step guide to safely replace the eMMC bootloader with your custom U-Boot.
+✅ Prerequisites:
+
+    A working Yocto build targeting TI AM64x (e.g. using meta-ti, tisdk_am64xx_defconfig).
+
+    Your custom U-Boot binary, e.g. u-boot-spl.bin, u-boot.img, or a combined .itb.
+
+    Access to Moxa UC-1222A console via UART.
+
+    Backup of the original eMMC bootloader (just in case).
+
+🛡️ Step 0: Backup the original eMMC bootloader
+
+You’ll want to dump the bootloader partitions first.
+
+# Use mmcblk0boot0 or mmcblk0boot1 depending on the board
+dd if=/dev/mmcblk0boot0 of=bootloader_backup.img bs=512 count=8192
+
+    ⚠️ Double-check the block device names! Run lsblk or cat /proc/partitions.
+
+🧪 Step 1: Test your U-Boot from SD card first
+
+Don’t go straight to eMMC — test your U-Boot from SD card:
+
+    Format an SD card like this:
+
+/dev/mmcblk1p1 (FAT32) --> BOOT partition with:
+- tiboot3.bin
+- tispl.bin
+- u-boot.img
+- sysfw.itb (if required)
+
+    Set boot switches to boot from SD.
+
+    Confirm it works and boots.
+
+🛠️ Step 2: Flash your bootloader to eMMC
+
+Once your build is validated from SD, flash it to eMMC manually.
+Flashing U-Boot parts
+
+# Enable access to the boot partition
+echo 0 > /sys/block/mmcblk0boot0/force_ro
+
+# Write SPL (usually ~128 KB)
+dd if=tiboot3.bin of=/dev/mmcblk0boot0 bs=512 seek=0 conv=notrunc
+
+# Write TISPL
+dd if=tispl.bin of=/dev/mmcblk0boot0 bs=512 seek=256 conv=notrunc
+
+# Write u-boot.img
+dd if=u-boot.img of=/dev/mmcblk0boot0 bs=512 seek=1024 conv=notrunc
+
+sync
+
+    Adjust the seek values based on your U-Boot layout. You can find this in the u-boot.map or U-Boot source tree under include/configs/.
+
+🧹 Optional: Mark the eMMC boot partition
+
+Make sure the board is configured to boot from mmcblk0boot0:
+
+# Set boot partition to 0
+mmc bootpart enable 1 0 /dev/mmcblk0
+
+🔁 Step 3: Reboot and test
+
+Power cycle the board and check via UART whether your custom U-Boot loads.
+
+If you see your U-Boot banner — success 🎉
+🆘 Recovery if it fails
+
+If booting from eMMC fails:
+
+    Power off the device.
+
+    Insert the SD card with the working bootloader.
+
+    Set DIP switches to boot from SD.
+
+    Boot and restore original bootloader using your backup:
+
+dd if=bootloader_backup.img of=/dev/mmcblk0boot0 bs=512 conv=notrunc
+
+Would you like:
+
+    A Yocto recipe to install U-Boot directly to eMMC?
+
+    A script that automates the backup + flashing steps?
+
+    Help integrating this into a do_deploy or do_image_complete task?
+
+Let me know and I’ll tailor it!
+You said:
+yes
+ChatGPT said:
+
+Great! Let’s tackle this in three parts to meet your request:
+✅ 1. Yocto Integration: Deploy U-Boot to eMMC
+
+We’ll extend your Yocto build so that once you boot the board (from SD or eMMC), it automatically installs U-Boot into eMMC.
+
+This can be done by adding a custom recipe that:
+
+    Backs up the existing eMMC bootloader.
+
+    Flashes your new tiboot3.bin, tispl.bin, u-boot.img.
+
+🔧 meta-moxa/recipes-bsp/u-boot/u-boot-install.bb
+
+SUMMARY = "Install U-Boot to eMMC"
+LICENSE = "MIT"
+SRC_URI = ""
+
+inherit deploy
+
+do_install() {
+    install -d ${D}/usr/share/u-boot-install
+    install ${DEPLOY_DIR_IMAGE}/tiboot3.bin ${D}/usr/share/u-boot-install/
+    install ${DEPLOY_DIR_IMAGE}/tispl.bin ${D}/usr/share/u-boot-install/
+    install ${DEPLOY_DIR_IMAGE}/u-boot.img ${D}/usr/share/u-boot-install/
+}
+
+do_deploy_append() {
+    install -d ${DEPLOYDIR}/u-boot-install
+    cp ${DEPLOY_DIR_IMAGE}/tiboot3.bin ${DEPLOYDIR}/u-boot-install/
+    cp ${DEPLOY_DIR_IMAGE}/tispl.bin ${DEPLOYDIR}/u-boot-install/
+    cp ${DEPLOY_DIR_IMAGE}/u-boot.img ${DEPLOYDIR}/u-boot-install/
+}
+
+FILES:${PN} += "/usr/share/u-boot-install"
+
+✅ 2. Install Script: Flash U-Boot to eMMC safely
+
+Deploy this as a systemd service or run it manually after boot.
+🔧 /usr/bin/flash-uboot.sh
+
+#!/bin/bash
+
+set -e
+
+EMMC_BOOT0="/dev/mmcblk0boot0"
+BACKUP="/usr/share/u-boot-install/bootloader_backup.img"
+LOG="/var/log/uboot-flash.log"
+
+exec > >(tee -a "$LOG") 2>&1
+
+echo "[*] Enabling write access to ${EMMC_BOOT0}"
+echo 0 > /sys/block/mmcblk0boot0/force_ro
+
+echo "[*] Backing up original bootloader..."
+dd if=${EMMC_BOOT0} of=${BACKUP} bs=512 count=8192
+
+echo "[*] Flashing tiboot3.bin..."
+dd if=/usr/share/u-boot-install/tiboot3.bin of=${EMMC_BOOT0} bs=512 seek=0 conv=notrunc
+
+echo "[*] Flashing tispl.bin..."
+dd if=/usr/share/u-boot-install/tispl.bin of=${EMMC_BOOT0} bs=512 seek=256 conv=notrunc
+
+echo "[*] Flashing u-boot.img..."
+dd if=/usr/share/u-boot-install/u-boot.img of=${EMMC_BOOT0} bs=512 seek=1024 conv=notrunc
+
+echo "[*] Setting boot partition..."
+mmc bootpart enable 1 0 /dev/mmcblk0
+
+echo "[✔] U-Boot installed successfully. Reboot to test."
+
+Make it executable:
+
+chmod +x /usr/bin/flash-uboot.sh
+
+✅ 3. (Optional) Systemd Service for First Boot
+
+Create a service that auto-flashes U-Boot on first boot.
+🔧 /etc/systemd/system/flash-uboot.service
+
+[Unit]
+Description=Flash U-Boot to eMMC
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/flash-uboot.sh
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target
+
+Enable it:
+
+systemctl enable flash-uboot.service
+
+📦 Add this to Yocto Image
+
+In your image recipe (e.g. core-image-moxa.bb):
+
+IMAGE_INSTALL:append = " u-boot-install"
+
+✅ Result
+
+Now, once your Yocto image is deployed:
+
+    U-Boot binaries are copied to /usr/share/u-boot-install.
+
+    Script /usr/bin/flash-uboot.sh can be run manually or automatically.
+
+    Your new U-Boot will be installed on eMMC boot partitions with backup.
+
+    You stay safe with recovery via SD if needed.
+
+Would you like me to generate all those files for you in a tarball structure, or show you how to test this from an SD image before integrating it?
+You said:
+'m using u-boot-ti-staging
+ChatGPT said:
+
+Perfect — since you’re using u-boot-ti-staging, we’ll align everything with the TI AM64x SPL + TISPL + U-Boot.img flow, and leverage what Yocto already builds.
+
+Let me now tailor the full integration to your setup.
+✅ Confirmed Environment
+
+You are using:
+
+    u-boot-ti-staging from meta-ti
+
+    TI’s 3-stage bootloader for AM64x:
+
+        tiboot3.bin (SPL for R5F)
+
+        tispl.bin (ATF + DT + DDR init + SPL loader)
+
+        u-boot.img (main U-Boot)
+
+✅ Goal
+
+Build these bootloader binaries with Yocto and automatically flash them into eMMC boot partitions from within your running system.
+✅ Part 1: Ensure correct outputs are built
+
+In your local.conf, make sure you’re building these:
+
+UBOOT_MACHINE = "am64x_evm_defconfig"
+
+When you run:
+
+bitbake u-boot-ti-staging
+
+Yocto will output:
+
+    tiboot3.bin
+
+    tispl.bin
+
+    u-boot.img
+
+You’ll find them under:
+
+tmp/deploy/images/<machine>/
+
+Confirm with:
+
+ls tmp/deploy/images/*/tiboot3.bin
+
+✅ Part 2: Install recipe (custom .bb) for eMMC flash
+
+We'll create u-boot-flash as a new recipe:
+🔧 File: meta-moxa/recipes-bsp/u-boot/u-boot-flash.bb
+
+SUMMARY = "Installs and flashes U-Boot to eMMC safely"
+LICENSE = "MIT"
+inherit deploy
+
+SRC_URI = ""
+
+do_install() {
+    install -d ${D}/usr/share/u-boot-flash
+    install ${DEPLOY_DIR_IMAGE}/tiboot3.bin ${D}/usr/share/u-boot-flash/
+    install ${DEPLOY_DIR_IMAGE}/tispl.bin ${D}/usr/share/u-boot-flash/
+    install ${DEPLOY_DIR_IMAGE}/u-boot.img ${D}/usr/share/u-boot-flash/
+    install -m 0755 ${WORKDIR}/flash-uboot.sh ${D}/usr/bin/flash-uboot.sh
+    install -m 0644 ${WORKDIR}/flash-uboot.service ${D}/etc/systemd/system/flash-uboot.service
+}
+
+do_deploy:append() {
+    install -d ${DEPLOYDIR}/u-boot-flash
+    cp ${DEPLOY_DIR_IMAGE}/tiboot3.bin ${DEPLOYDIR}/u-boot-flash/
+    cp ${DEPLOY_DIR_IMAGE}/tispl.bin ${DEPLOYDIR}/u-boot-flash/
+    cp ${DEPLOY_DIR_IMAGE}/u-boot.img ${DEPLOYDIR}/u-boot-flash/
+}
+
+FILES:${PN} += " \
+  /usr/share/u-boot-flash \
+  /usr/bin/flash-uboot.sh \
+  /etc/systemd/system/flash-uboot.service \
+"
+
+🔧 File: files/flash-uboot.sh
+
+#!/bin/bash
+
+set -e
+
+BOOT0="/dev/mmcblk0boot0"
+BACKUP="/usr/share/u-boot-flash/bootloader_backup.img"
+LOG="/var/log/uboot-flash.log"
+
+exec > >(tee -a "$LOG") 2>&1
+
+echo "[*] Enabling write access to ${BOOT0}"
+echo 0 > /sys/block/mmcblk0boot0/force_ro
+
+echo "[*] Backing up current bootloader to ${BACKUP}"
+dd if=$BOOT0 of=$BACKUP bs=512 count=8192
+
+echo "[*] Flashing tiboot3.bin to 0x0"
+dd if=/usr/share/u-boot-flash/tiboot3.bin of=$BOOT0 bs=512 seek=0 conv=notrunc
+
+echo "[*] Flashing tispl.bin to 0x200"
+dd if=/usr/share/u-boot-flash/tispl.bin of=$BOOT0 bs=512 seek=512 conv=notrunc
+
+echo "[*] Flashing u-boot.img to 0x800"
+dd if=/usr/share/u-boot-flash/u-boot.img of=$BOOT0 bs=512 seek=2048 conv=notrunc
+
+echo "[*] Setting eMMC boot partition"
+mmc bootpart enable 1 0 /dev/mmcblk0
+
+echo "[✔] U-Boot flashed to eMMC successfully. Reboot to apply."
+
+🔧 File: files/flash-uboot.service
+
+[Unit]
+Description=Flash custom U-Boot to eMMC on first boot
+ConditionPathExists=/usr/bin/flash-uboot.sh
+After=default.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/flash-uboot.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+
+✅ Part 3: Add the flash package to your image
+
+In your custom image recipe (meta-moxa/recipes-core/images/core-image-moxa.bb):
+
+IMAGE_INSTALL:append = " u-boot-flash"
+
+✅ Part 4: Final check
+
+Build it:
+
+bitbake u-boot-flash
+bitbake core-image-moxa
+
+Burn the image to SD card → boot the board → systemd will automatically flash your U-Boot to eMMC, with a backup and logs.
+🛑 Optional Safety
+
+Add a file to disable reflashing after first boot:
+
+touch /etc/u-boot-installed
+
+And modify the .service to run only if it doesn't exist:
+
+ConditionPathExists=!/etc/u-boot-installed
+
+✅ Bonus: Would you like...
+
+    A script to generate a .wic or .sdimg with this bootloader pre-installed?
+
+    A U-Boot environment script to configure fallback boot to SD if eMMC fails?
+
+    Recovery via UART to reflash eMMC bootloader?
+
+Let me know how deep you want to go 🔧
+You said:
+yes all of them
+ChatGPT said:
+
+Parfait, Younes ! Voici un plan complet pour intégrer les trois fonctionnalités que tu veux :
+✅ 1. Générer une image .wic ou .sdimg avec U-Boot préinstallé
+🔧 Étapes
+A. Ajouter un fichier .wks personnalisé dans ton layer :
+
+meta-moxa/wic/moxa-image-bootloader.wks
+
+📄 Contenu de moxa-image-bootloader.wks :
+
+part --source bootloader --ondisk mmcblk0 --fstype=msdos --label=boot --active --align 4
+
+bootloader --ptable gpt \
+  --source rawcopy \
+  --offset 0 \
+  --file tiboot3.bin \
+  --file tispl.bin \
+  --file u-boot.img
+
+    Cela écrit les trois fichiers directement dans le MBR de la carte SD (utile pour test et récupération).
+
+B. Ajouter un fichier .bbclass pour injecter les bootloaders dans WIC :
+
+meta-moxa/classes/bootloader-images.bbclass
+
+do_image_wic[depends] += "u-boot-ti-staging:do_deploy"
+
+IMAGE_BOOT_FILES += " \
+    tiboot3.bin \
+    tispl.bin \
+    u-boot.img \
+"
+
+C. Activer dans ton image .bb :
+
+inherit bootloader-images
+
+WKS_FILE = "moxa-image-bootloader.wks"
+IMAGE_FSTYPES:append = " wic.bmap wic.gz"
+
+✅ 2. U-Boot : fallback vers la carte SD si eMMC échoue
+🧠 Logique :
+
+U-Boot doit d'abord essayer l’eMMC (mmc dev 0), et s’il échoue, passer à la carte SD (mmc dev 1).
+📝 Dans U-Boot : include/configs/am64x_evm.h
+
+Ajoute dans l’environnement :
+
+#define CONFIG_EXTRA_ENV_SETTINGS \
+    "bootcmd=run try_emmc_boot; run try_sd_boot;\0" \
+    "try_emmc_boot=mmc dev 0; fatload mmc 0:1 ${loadaddr} boot.scr; source ${loadaddr};\0" \
+    "try_sd_boot=mmc dev 1; fatload mmc 1:1 ${loadaddr} boot.scr; source ${loadaddr};\0"
+
+    Cette logique essaie d’exécuter un script boot.scr sur eMMC, sinon passe à la SD.
+
+Tu peux aussi faire une version basée sur des .itb si tu charges un Image + DTB.
+✅ 3. UART Recovery : flasher le bootloader eMMC
+💡 Objectif :
+
+Démarrer via UART (mode BOOT0) et envoyer un script qui restaure tiboot3.bin, tispl.bin, u-boot.img vers /dev/mmcblk0boot0.
+🔧 Méthode :
+A. Activer UART boot sur UC-1222A
+
+    Mettre les jumpers pour boot UART (voir doc Moxa ou schéma matériel).
+
+    Connecter via USB-UART.
+
+B. Utiliser python3 + kermit pour envoyer le SPL :
+
+python3 ./load_uart_spl.py tiboot3.bin
+
+    Utilise k3-image-gen de TI pour packager correctement le tiboot3.
+
+C. Après le boot SPL → TFTP ou Y-Modem :
+
+    Charger Linux minimal via UART ou SD.
+
+    Restaurer le bootloader avec :
+
+echo 0 > /sys/block/mmcblk0boot0/force_ro
+dd if=tiboot3.bin of=/dev/mmcblk0boot0 bs=512 seek=0
+dd if=tispl.bin of=/dev/mmcblk0boot0 bs=512 seek=512
+dd if=u-boot.img of=/dev/mmcblk0boot0 bs=512 seek=2048
+
+📦 Prochaine étape : veux-tu que je te génère tous ces fichiers prêts à intégrer dans meta-moxa ?
+
+    .wks personnalisé ✅
+
+    .bbclass pour injecter les bootloaders ✅
+
+    Script boot.scr avec fallback logique ✅
+
+    Exemple de script Python pour UART flash/recovery ✅
+
+Je peux aussi te proposer une structure complète avec arborescence meta-moxa/ directement si tu veux intégrer proprement tout ça dans ton BSP. Tu veux ?
+You said:
+oui
+ChatGPT said:
+
+C’est prêt ✅
+Tu as maintenant un BSP complet meta-moxa avec :
+
+    📦 Image .wic bootable avec U-Boot intégré.
+
+    🔁 Fallback SD/eMMC via boot.cmd intégré.
+
+    🛠️ Script de flash UART pour restaurer tiboot3.bin.
+
+🗂 Structure intégrée :
+
+Tu peux copier ce contenu dans ton meta-moxa, puis :
+
+bitbake core-image-moxa
+
+📌 Prochaine étape :
+
+Souhaites-tu que je te crée aussi :
+
+    Un script pour générer boot.scr à partir de boot.cmd avec mkimage ?
+
+    Un .bb Yocto pour inclure boot.scr automatiquement dans la partition FAT ?
+
+    Une recette pour installer le uart_flash_recovery.py dans ton image ?
+
+Dis-moi ce que tu veux automatiser ensuite 🔧
+
+
+ChatGPT can make mistakes. Check important info.
+***************************************************************************************************************************************************************************************
+meta-moxa/
+├── classes/
+│   └── bootloader-images.bbclass
+├── recipes-core/
+│   └── images/
+│       └── core-image-moxa.bb
+├── recipes-bsp/
+│   └── u-boot/
+│       ├── u-boot-flash.bb
+│       └── files/
+│           ├── flash-uboot.sh
+│           └── flash-uboot.service
+├── wic/
+│   └── moxa-image-bootloader.wks
+├── scripts/
+│   └── uart_flash_recovery.py
+└── boot/
+    └── boot.cmd
+
+# === bootloader-images.bbclass ===
+do_image_wic[depends] += "u-boot-ti-staging:do_deploy"
+
+IMAGE_BOOT_FILES += " \
+    tiboot3.bin \
+    tispl.bin \
+    u-boot.img \
+"
+
+# === core-image-moxa.bb (excerpt) ===
+require recipes-core/images/core-image-minimal.bb
+
+DESCRIPTION = "Moxa UC-1222A Custom Image"
+
+inherit bootloader-images
+
+IMAGE_INSTALL:append = " u-boot-flash"
+
+WKS_FILE = "moxa-image-bootloader.wks"
+IMAGE_FSTYPES:append = " wic.bmap wic.gz"
+
+# === moxa-image-bootloader.wks ===
+part --source bootloader --ondisk mmcblk0 --fstype=msdos --label=boot --active --align 4
+
+bootloader --ptable gpt \
+  --source rawcopy \
+  --offset 0 \
+  --file tiboot3.bin \
+  --file tispl.bin \
+  --file u-boot.img
+
+# === flash-uboot.sh ===
+#!/bin/bash
+
+set -e
+
+BOOT0="/dev/mmcblk0boot0"
+BACKUP="/usr/share/u-boot-flash/bootloader_backup.img"
+LOG="/var/log/uboot-flash.log"
+
+exec > >(tee -a "$LOG") 2>&1
+
+echo "[*] Enabling write access to ${BOOT0}"
+echo 0 > /sys/block/mmcblk0boot0/force_ro
+
+echo "[*] Backing up current bootloader to ${BACKUP}"
+dd if=$BOOT0 of=$BACKUP bs=512 count=8192
+
+echo "[*] Flashing tiboot3.bin to 0x0"
+dd if=/usr/share/u-boot-flash/tiboot3.bin of=$BOOT0 bs=512 seek=0 conv=notrunc
+
+echo "[*] Flashing tispl.bin to 0x200"
+dd if=/usr/share/u-boot-flash/tispl.bin of=$BOOT0 bs=512 seek=512 conv=notrunc
+
+echo "[*] Flashing u-boot.img to 0x800"
+dd if=/usr/share/u-boot-flash/u-boot.img of=$BOOT0 bs=512 seek=2048 conv=notrunc
+
+echo "[*] Setting eMMC boot partition"
+mmc bootpart enable 1 0 /dev/mmcblk0
+
+echo "[✔] U-Boot flashed to eMMC successfully. Reboot to apply."
+
+# === flash-uboot.service ===
+[Unit]
+Description=Flash custom U-Boot to eMMC on first boot
+ConditionPathExists=/usr/bin/flash-uboot.sh
+After=default.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/flash-uboot.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+
+# === boot.cmd (U-Boot fallback script) ===
+setenv try_emmc 'mmc dev 0; fatload mmc 0:1 ${loadaddr} boot.scr; source ${loadaddr}'
+setenv try_sd 'mmc dev 1; fatload mmc 1:1 ${loadaddr} boot.scr; source ${loadaddr}'
+setenv bootcmd 'run try_emmc; run try_sd'
+saveenv
+
+# === uart_flash_recovery.py ===
+#!/usr/bin/env python3
+import serial
+import time
+
+SERIAL_PORT = '/dev/ttyUSB0'
+BAUDRATE = 115200
+BIN_FILE = 'tiboot3.bin'
+
+with serial.Serial(SERIAL_PORT, BAUDRATE, timeout=1) as ser:
+    with open(BIN_FILE, 'rb') as f:
+        data = f.read()
+        print("[*] Sending tiboot3.bin via UART...")
+        ser.write(data)
+        time.sleep(5)
+        print("[✔] Done.")
+
+
+
+*********************************************************************
+saveenv
+
+# === uart_flash_recovery.py ===
+#!/usr/bin/env python3
+import serial
+import time
+
+SERIAL_PORT = '/dev/ttyUSB0'
+BAUDRATE = 115200
+BIN_FILE = 'tiboot3.bin'
+
+with serial.Serial(SERIAL_PORT, BAUDRATE, timeout=1) as ser:
+    with open(BIN_FILE, 'rb') as f:
+        data = f.read()
+        print("[*] Sending tiboot3.bin via UART...")
+        ser.write(data)
+        time.sleep(5)
+        print("[✔] Done.")
+
