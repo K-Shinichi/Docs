@@ -1,0 +1,748 @@
+Thanks for sharing the SD card layout — this looks like a classic A/B redundancy setup for the Phytec phyGATE-Tauri-S using Barebox and a msdos partition table. Let me help you walk through and validate the structure, then I’ll explain how this image will behave on boot and how it can be managed or extended further.
+✅ Layout Summary & Explanation
+Bootloader (Barebox)
+
+mmc:
+  boot-partitions:
+    enable: 1
+    binaries:
+      - input-offset: 0
+        output-offset: 0
+        input:
+          filename: barebox.bin
+
+    boot-partitions: enable: 1: This enables the hardware boot partitions on eMMC (often mmcblkXboot0/1).
+
+    barebox.bin is written both to the boot partition and at a raw offset:
+
+    raw:
+      - input-offset: 1kiB
+        output-offset: 1kiB
+        input:
+          filename: barebox.bin
+
+    So you’ve got Barebox available at:
+
+        Boot0 eMMC boot partition (for ROM boot)
+
+        RAW offset (in case fallback is needed or for alternate boot)
+
+Partitions
+
+Your partition layout uses both primary and logical partitions in an extended layout:
+
+partitions:
+  - BOOT0   (FAT32) - zImage + oftree (kernel + DTB)
+  - BOOT1   (FAT32) - redundant kernel + DTB
+  - CONFIG  (ext4)  - stores config-partition.tar.gz
+  - ROOT0   (logical) - rootfs.ext4
+  - ROOT1   (logical) - rootfs.ext4 (redundant)
+
+    A/B System Design:
+
+        BOOT0 + ROOT0 = System A
+
+        BOOT1 + ROOT1 = System B
+
+        This allows reliable OTA updates: the inactive system can be flashed and tested before switching.
+
+    CONFIG Partition:
+
+        Used by Barebox or your init scripts to store boot state/config flags (e.g., which slot to boot, rollback triggers).
+
+🧠 Boot Flow Summary
+
+Here's what happens during boot:
+
+    ROM bootloader loads barebox.bin from eMMC boot partition or raw area.
+
+    Barebox reads configuration (potentially from CONFIG).
+
+    Barebox selects:
+
+        BOOT0 + ROOT0 if active slot A
+
+        BOOT1 + ROOT1 if active slot B
+
+    Kernel (zImage) and DTB (oftree) are loaded from the chosen BOOT partition.
+
+    Kernel mounts ROOTx as rootfs.
+
+🔧 How to Extend / Use
+
+If you want to:
+🔁 Switch Active Slot
+
+    Barebox usually handles this via environment variables:
+
+    global.boot.default=0  # 0 = ROOT0 / 1 = ROOT1
+
+🛠️ Manually Test on Device
+
+From Barebox prompt:
+
+setenv global.boot.default 1
+saveenv
+reboot
+
+📦 OTA Updates (A/B Safety)
+
+    Deploy new rootfs to ROOT1
+
+    Update kernel in BOOT1
+
+    Set global.boot.default=1
+
+    If boot fails, Barebox can fall back to slot A
+
+🧪 Validation & Flashing Tips
+1. Check partition alignment:
+
+Make sure BOOT partitions start at 4MiB+ and are aligned (you already did this ✅)
+2. Flash the image:
+
+Use dd or bmaptool:
+
+sudo dd if=yourimage.img of=/dev/sdX bs=4M status=progress
+
+3. Inspect partitions:
+
+lsblk -f
+sudo mount /dev/sdX1 /mnt  # For BOOT0
+
+4. Confirm Barebox loads:
+
+Use UART serial console to see Barebox output and interact if needed.
+🧩 Possible Improvements
+
+    Add UBI support if migrating from ext4 to NAND/UBI-based rootfs.
+
+    Include a boot counter or rollback mechanism in CONFIG.
+
+    Use barebox-state driver to manage boot state flags safely (via /dev/nvmem or /dev/mtd).
+
+If you want, I can also help you write a Barebox boot script for slot selection, or even generate a wic image config that matches this layout for Yocto directly. Want that?
+You said:
+but when i boot from the sdcard i get stock on bootloader and when i type boot it show me system0 and system1 and tell's me no bootable device ?
+ChatGPT said:
+
+Thanks Younes — this is very useful info. The fact that Barebox is booting but shows system0 and system1 with "no bootable device" likely means that Barebox is loaded correctly but it either:
+
+    Cannot find or mount the BOOT or ROOT partitions (e.g., bad label, bad device mapping, or missing filesystem).
+
+    Or the boot script / environment variables are not correctly set up to point to the zImage and oftree.
+
+Let's debug this step-by-step:
+🧠 Understanding Your Error:
+
+When you type boot and it lists system0 and system1 but says "no bootable device", it usually means:
+
+    Barebox is correctly detecting your dual-boot layout (A/B system), but…
+
+    Either BOOT0 / BOOT1 or ROOT0 / ROOT1 aren't mounted or found.
+
+    Or, the boot script doesn't know what files to load (zImage, oftree, etc.).
+
+✅ Step-by-step Debug Plan
+🔍 1. Check if partitions are visible from Barebox
+
+At the Barebox prompt, type:
+
+ls /dev
+
+You should see something like:
+
+/dev/mmc0.boot0
+/dev/mmc0.boot1
+/dev/mmc0
+/dev/mmc0.0    (BOOT0)
+/dev/mmc0.1    (BOOT1)
+/dev/mmc0.2    (CONFIG)
+/dev/mmc0.3    (ROOT0)
+/dev/mmc0.4    (ROOT1)
+
+If partitions are missing, maybe your disk image isn’t properly flashed or the table is corrupt. Use part command to check:
+
+part /dev/mmc0
+
+🗂️ 2. Try mounting BOOT0 manually
+
+mount /dev/mmc0.0 /mnt
+ls /mnt
+
+You should see:
+
+zImage
+oftree
+
+If not, you might:
+
+    Have the wrong partition index
+
+    Be missing the files
+
+    Be missing the vfat support in Barebox
+
+You can also test BOOT1:
+
+mount /dev/mmc0.1 /mnt
+ls /mnt
+
+⚙️ 3. Check Barebox environment variables
+
+See if your boot entries are correct:
+
+env
+
+You’re looking for something like:
+
+global.boot.default=0
+global.system0.root=/dev/mmc0.3
+global.system0.boot=/dev/mmc0.0
+global.system1.root=/dev/mmc0.4
+global.system1.boot=/dev/mmc0.1
+
+If these are missing, you can set them manually:
+
+setenv global.system0.boot /dev/mmc0.0
+setenv global.system0.root /dev/mmc0.3
+setenv global.system1.boot /dev/mmc0.1
+setenv global.system1.root /dev/mmc0.4
+setenv global.boot.default 0
+saveenv
+
+🚀 4. Try booting manually
+
+After mounting BOOT0:
+
+load /mnt/zImage
+load /mnt/oftree
+bootm /mnt/zImage /mnt/oftree
+
+This will bypass the auto-boot and let you test manually.
+🛠️ 5. Check file system compatibility
+
+If mounting fails with mount: No such device, Barebox might be missing support for:
+
+    vfat (needed for BOOT0/1)
+
+    ext4 (for CONFIG or ROOTx)
+
+Let me know your Barebox version and whether you're building it yourself — I can help you enable those in the Barebox config:
+
+make menuconfig
+-> Filesystem support
+-> Enable VFAT / EXT4
+
+🧪 Final Sanity Check
+
+Make sure the SD card is written properly with:
+
+sudo fdisk -l /dev/sdX
+sudo mount /dev/sdX1 /mnt  # Check BOOT0 content
+
+✅ TL;DR Fix Summary
+
+To fix "no bootable device":
+
+    Verify partitions /dev/mmc0.x exist in Barebox.
+
+    Mount BOOT0 and confirm zImage and oftree are there.
+
+    Set boot env vars:
+
+setenv global.system0.boot /dev/mmc0.0
+setenv global.system0.root /dev/mmc0.3
+setenv global.boot.default 0
+saveenv
+
+Manually test:
+
+    mount /dev/mmc0.0 /mnt
+    bootm /mnt/zImage /mnt/oftree
+
+Want me to give you a complete Barebox boot script to auto-select system0 or system1 based on success/failure and do fallback? I can write one tailored for your layout.
+You said:
+es
+ChatGPT said:
+
+Parfait Younes ! Voici un script Barebox complet adapté à ton layout A/B (BOOT0/ROOT0 et BOOT1/ROOT1) pour ton image Yocto sur la phyGATE-Tauri S. Ce script :
+
+    Détecte quel système (system0 ou system1) est actif (global.boot.default)
+
+    Monte la bonne partition BOOT et charge zImage + oftree
+
+    Démarre avec bootm
+
+    Gère un fallback automatique si l’un des systèmes échoue (si tu ajoutes un mécanisme bootstate, on pourra aller plus loin)
+
+✅ Script de boot boot (à mettre dans Barebox ou dans un fichier boot sur BOOTx)
+
+Tu peux copier-coller ceci dans Barebox via UART ou l’ajouter dans l’environnement persistant (/env/init/boot si dispo) :
+
+#!/bin/sh
+
+echo "== Barebox A/B Boot Script =="
+
+# Choix de la slot active
+bootslot="${global.boot.default}"
+echo "Active bootslot: system$bootslot"
+
+# Sélection des partitions selon la slot
+if [ "$bootslot" = "0" ]; then
+    bootdev="/dev/mmc0.0"
+    rootdev="/dev/mmc0.3"
+elif [ "$bootslot" = "1" ]; then
+    bootdev="/dev/mmc0.1"
+    rootdev="/dev/mmc0.4"
+else
+    echo "Invalid bootslot '$bootslot'. Falling back to system0"
+    bootslot="0"
+    bootdev="/dev/mmc0.0"
+    rootdev="/dev/mmc0.3"
+fi
+
+echo "Boot partition: $bootdev"
+echo "Root filesystem: $rootdev"
+
+# Monter la partition BOOTx
+if ! mount $bootdev /mnt; then
+    echo "Failed to mount $bootdev"
+    exit 1
+fi
+
+# Charger kernel et dtb
+if [ -f /mnt/zImage ] && [ -f /mnt/oftree ]; then
+    echo "Loading zImage and oftree..."
+    global.linux.bootargs.dyn.root="root=$rootdev rootwait rw"
+    bootm /mnt/zImage /mnt/oftree
+else
+    echo "Missing zImage or oftree in $bootdev"
+    umount /mnt
+    exit 1
+fi
+
+🛠️ Comment l’installer
+🔹 Option 1: le coller manuellement dans Barebox
+
+edit /env/bin/boot
+# (colle le script ci-dessus, puis Ctrl+D pour sauvegarder)
+
+Ensuite rends-le exécutable (s’il ne l’est pas déjà) :
+
+chmod +x /env/bin/boot
+
+Et assure-toi que boot est appelé par /env/init/ :
+
+ls /env/init/
+
+S’il y a un autoboot ou init, modifie-le pour qu’il appelle boot :
+
+edit /env/init/autoboot
+# (ajoute ou modifie ligne: /env/bin/boot)
+
+🔹 Option 2: via la partition BOOT0
+
+Tu peux créer un fichier boot (ou boot.sh) à la racine de BOOT0/BOOT1, mais ce n'est pris en charge que si tu as modifié ton environnement Barebox pour le faire.
+🧪 Tester le boot script
+
+Tu peux forcer le script à démarrer le slot 1 comme ceci :
+
+setenv global.boot.default 1
+saveenv
+boot
+
+Si ROOT1 ne fonctionne pas ou manque, il t’indiquera "Missing zImage or oftree".
+🔄 Fallback auto (optionnel)
+
+Tu veux aussi que Barebox détecte l’échec du boot et revienne à system0 tout seul ? Il faut alors intégrer bootstate, qui utilise la partition CONFIG pour stocker l’état du système et rollback si besoin. Je peux te le configurer avec :
+
+    bootstate driver
+
+    gestion du flag bootstate.system0.ok / bootstate.system1.ok
+
+    rollback automatique si kernel panic ou erreur
+
+Veux-tu que je t’écrive la version avec bootstate intégrée ?
+You said:
+i think this happens because there in an initial bootloder in emmc, if o boot from emmc i get stock in bootloader beacause there is not rootfs and when flashed the sdcard with only 2 partition boot and rootfs it worked but not whith rauc full layout 
+ChatGPT said:
+
+Ahhh yes Younes, that totally makes sense — now your issue is crystal clear 🔍
+
+You're booting into Barebox from eMMC, but the environment and setup there are not aligned with your SD card's full RAUC-style A/B layout (with BOOT0, BOOT1, ROOT0, ROOT1, and CONFIG). That explains why it works with a minimal 2-partition image, but not with your full redundant layout.
+
+Let’s break it down and fix it:
+🔥 What’s Happening
+
+    Your eMMC bootloader (Barebox) is executing.
+
+    But it’s:
+
+        Using its internal environment
+
+        Not aware of your SD card layout
+
+        Looking for system0/system1 in the eMMC, where there is no rootfs or valid partitions.
+
+    That’s why boot fails and says “no bootable device”.
+
+✅ Why Your Minimal SD Image Works
+
+When you flashed a simpler SD card (just boot and rootfs), the bootloader found the kernel and rootfs directly without needing the full boot environment, system selection, or RAUC integration.
+
+It probably just mounted /dev/mmc1p1, found zImage, and booted.
+✅ Why the RAUC-style A/B Layout Fails
+
+Because:
+
+    Your eMMC Barebox has no knowledge of the SD card layout, so it can’t find:
+
+        /dev/mmc1.x devices (it might not even scan mmc1)
+
+        global.system0.boot, system1.root, etc.
+
+    It defaults to system0/system1, but these are undefined or point to invalid eMMC paths.
+
+🛠️ How to Fix It (2 Options)
+🔹 Option 1: Boot everything from the SD card, including Barebox
+
+If you want to test the full layout (bootloader, kernel, rootfs, RAUC A/B) from SD:
+✅ Flash Barebox to SD card too
+
+Make sure you:
+
+    Disable eMMC boot (mmc bootpart enable 0 0 /dev/mmcblk0) — or just ignore it
+
+    Flash barebox.bin to SD card at:
+
+    dd if=barebox.bin of=/dev/sdX bs=1024 seek=1
+
+    Or: place barebox.bin in SD’s boot partition and configure bootrom or U-Boot to chainload it
+
+✅ Your SD card must include:
+
+    barebox.bin at raw offset (or MBR boot)
+
+    All 5 partitions: BOOT0, BOOT1, CONFIG, ROOT0, ROOT1
+
+Now the system will boot entirely from SD, including the right Barebox version and environment.
+🔹 Option 2: Use Barebox from eMMC but make it aware of SD layout
+
+If you want to keep Barebox in eMMC, but boot full system from SD:
+✅ Fix your Barebox environment
+
+Boot into Barebox prompt and do:
+
+devinfo
+
+Check if /dev/mmc1 is listed (SD card). If not, your Barebox is missing SD/MMC support or didn’t probe it.
+
+Then, manually configure the boot environment to use SD:
+
+setenv global.system0.boot /dev/mmc1.0
+setenv global.system0.root /dev/mmc1.3
+setenv global.system1.boot /dev/mmc1.1
+setenv global.system1.root /dev/mmc1.4
+setenv global.boot.default 0
+saveenv
+
+Then test manually:
+
+mount /dev/mmc1.0 /mnt
+bootm /mnt/zImage /mnt/oftree
+
+✅ If that works, you're good. Just make sure /env/bin/boot runs this logic (as shown in the previous reply).
+🧠 TL;DR Fix Strategy
+Scenario	Solution
+Bootloader in eMMC, full layout on SD	Set correct global.systemX.boot/root in environment (pointing to mmc1.X)
+Bootloader on SD	Flash barebox.bin to SD raw offset (with your layout config)
+Want RAUC + bootstate fully working	Must boot from a Barebox that supports CONFIG partition + bootstate
+🚀 Want Full Setup?
+
+If you tell me:
+
+    Do you want to boot entirely from SD, or just use SD rootfs with eMMC bootloader?
+
+    Your current Barebox version
+
+    Whether you want RAUC bootstate rollback support fully integrated
+
+I can:
+
+    Write you the exact boot script
+
+    Patch your Barebox defconfig to support /dev/mmc1, VFAT, ext4, bootstate, RAUC, etc.
+
+    Give you the exact image layout with offsets for flashing
+
+Let me know which direction you're going!
+You said:
+is not changing the eemc bootloader with yocto one better idea ?
+ChatGPT said:
+
+Yes Younes — changing the eMMC bootloader with your Yocto-built Barebox is actually the best and cleanest solution, especially if:
+
+✅ You are planning to use the full RAUC A/B layout for production.
+✅ You want consistent boot behavior between eMMC and SD card.
+✅ You want to boot rootfs from eMMC eventually (not just test on SD).
+✅ You want to integrate bootstate, rollback, RAUC properly.
+✅ Why replacing the eMMC bootloader is better
+💡 1. Consistency
+
+You're building Barebox in Yocto — this gives you full control:
+
+    Same version, same config
+
+    Same environment layout
+
+    Same boot script logic
+
+    Can support SD, eMMC, RAUC, bootstate, etc.
+
+💡 2. Bootstate / RAUC Integration
+
+The default bootloader in the eMMC might:
+
+    Be too old
+
+    Lack bootstate support
+
+    Lack global.systemX.boot/root handling
+
+    Not mount /dev/mmc1.X (SD card) at all
+
+Replacing it ensures your bootloader supports all those features, exactly how you built and tested them in Yocto.
+💡 3. Simpler Maintenance
+
+When something breaks, you only debug one known bootloader:
+
+    No more "this works from SD but not from eMMC"
+
+    All partitions and environment are aligned
+
+⚠️ Risks / Things to Plan
+
+    Don't flash blindly: Always test from SD card first — you did this already, which is great.
+
+    Backup the current bootloader before replacing:
+
+    dd if=/dev/mmcblk0 of=bootloader-backup.bin bs=1K count=1024
+
+    Use a recovery strategy (e.g. UART + USB boot if eMMC fails).
+
+🛠️ How to Replace the eMMC Bootloader Safely
+
+Assuming you’re using the AM335x/AM64x/phyGATE platform, the bootloader is typically stored:
+
+    In raw mode, directly at the beginning of the eMMC (after MBR), or
+
+    In a dedicated boot partition (/dev/mmcblk0boot0).
+
+Here’s how to write it:
+🔸 Option 1: Raw offset (common for Barebox)
+
+dd if=barebox.bin of=/dev/mmcblk0 bs=1024 seek=1
+
+🔸 Option 2: eMMC boot partition
+
+echo 0 > /sys/block/mmcblk0boot0/force_ro  # Allow writing
+dd if=barebox.bin of=/dev/mmcblk0boot0 bs=512 seek=0
+
+Then tell ROM to boot from eMMC boot partition:
+
+mmc bootpart enable 1 1 /dev/mmcblk0
+
+💡 Don’t forget to also write the correct environment (barebox.env) if needed.
+✅ Yocto Integration
+
+If you want to make it fully integrated in Yocto, add a custom image.bbclass or wic layout that:
+
+    Writes barebox.bin to eMMC offset
+
+    Creates the partitions in the same layout (BOOT0/1, CONFIG, ROOT0/1)
+
+    Installs barebox.env, boot script, zImage, oftree, etc.
+
+I can generate this for you — just tell me:
+
+    Your board (AM335x, AM64x…?)
+
+    Do you want to use wic to build the full eMMC image?
+
+    Do you want dual-rootfs RAUC-ready layout directly from Yocto?
+
+✅ Conclusion
+
+Yes, flashing your Yocto-built Barebox into eMMC is not just a better idea — it’s actually the recommended long-term solution for embedded systems with:
+
+    RAUC
+
+    A/B partitioning
+
+    Secure & robust update strategies
+
+And you're already super close 🎯
+
+Let me know if you want:
+
+    A Yocto-compatible .wic layout for your full A/B + CONFIG + bootloader image
+
+    A meta-barebox setup with barebox-state, bootchooser, bootenv config
+
+    A script to flash the full image to eMMC from SD during provisioning
+
+I’ll tailor it exactly to your hardware.
+You said:
+A script to flash the full image to eMMC from SD during provisioning
+ChatGPT said:
+
+Perfect Younes! Here's a provisioning script that you can run from the SD card on your phyGATE-Tauri S to safely flash the entire Yocto A/B RAUC layout to the eMMC, including:
+
+    barebox.bin bootloader to eMMC boot partition or raw area
+
+    All system partitions: BOOT0, BOOT1, CONFIG, ROOT0, ROOT1
+
+    Optionally: the barebox.env and default boot script
+
+🧩 Assumptions
+
+Please confirm these match your setup:
+
+    SD card is /dev/mmcblk1
+
+    eMMC is /dev/mmcblk0
+
+    You have a full image layout as separate files:
+
+        barebox.bin
+
+        zImage, oftree
+
+        rootfs.ext4
+
+        config-partition.tar.gz
+
+    You’re using MBR layout (msdos) with 5 partitions:
+
+        BOOT0 = mmcblk0p1
+
+        BOOT1 = mmcblk0p2
+
+        CONFIG = mmcblk0p3
+
+        ROOT0 = mmcblk0p4
+
+        ROOT1 = mmcblk0p5
+
+🛠️ Flash Script: provision-emmc.sh
+
+#!/bin/sh
+
+set -e
+
+EMMC_DEV="/dev/mmcblk0"
+SD_DEV="/dev/mmcblk1"
+
+echo "== Provisioning eMMC ($EMMC_DEV) from SD ($SD_DEV) =="
+
+# Unmount everything first
+umount ${EMMC_DEV}* 2>/dev/null || true
+
+echo "--> Flashing Barebox to raw offset (1KiB)"
+dd if=barebox.bin of=$EMMC_DEV bs=1024 seek=1 conv=fsync
+
+echo "--> Partitioning eMMC..."
+parted -s $EMMC_DEV mklabel msdos
+
+# Partition layout:
+# 1: BOOT0 (FAT32, 64MiB)
+# 2: BOOT1 (FAT32, 64MiB)
+# 3: CONFIG (ext4, 192MiB)
+# 4: ROOT0 (ext4, 1000MiB)
+# 5: ROOT1 (ext4, 1000MiB)
+parted -s $EMMC_DEV mkpart primary fat32 4MiB 68MiB
+parted -s $EMMC_DEV mkpart primary fat32 68MiB 132MiB
+parted -s $EMMC_DEV mkpart primary ext4 132MiB 324MiB
+parted -s $EMMC_DEV mkpart primary ext4 324MiB 1324MiB
+parted -s $EMMC_DEV mkpart primary ext4 1324MiB 2324MiB
+
+echo "--> Formatting partitions..."
+mkfs.vfat -F32 ${EMMC_DEV}p1 -n BOOT0
+mkfs.vfat -F32 ${EMMC_DEV}p2 -n BOOT1
+mkfs.ext4 ${EMMC_DEV}p3 -L CONFIG
+mkfs.ext4 ${EMMC_DEV}p4 -L ROOT0
+mkfs.ext4 ${EMMC_DEV}p5 -L ROOT1
+
+echo "--> Populating BOOT0"
+mkdir -p /mnt/boot
+mount ${EMMC_DEV}p1 /mnt/boot
+cp zImage oftree /mnt/boot/
+umount /mnt/boot
+
+echo "--> Populating BOOT1"
+mount ${EMMC_DEV}p2 /mnt/boot
+cp zImage oftree /mnt/boot/
+umount /mnt/boot
+
+echo "--> Populating CONFIG"
+mkdir -p /mnt/config
+mount ${EMMC_DEV}p3 /mnt/config
+tar -xzf config-partition.tar.gz -C /mnt/config
+umount /mnt/config
+
+echo "--> Writing ROOT0"
+dd if=rootfs.ext4 of=${EMMC_DEV}p4 bs=4M status=progress conv=fsync
+
+echo "--> Writing ROOT1"
+dd if=rootfs.ext4 of=${EMMC_DEV}p5 bs=4M status=progress conv=fsync
+
+sync
+
+echo "== ✅ eMMC provisioning complete =="
+
+📝 Notes
+
+    You can also add barebox.env like this:
+
+echo "--> Installing barebox.env"
+mkdir -p /mnt/env
+mount ${EMMC_DEV}p3 /mnt/env
+cp barebox.env /mnt/env/
+umount /mnt/env
+
+(assuming CONFIG is where you want to store the environment)
+
+    You might need to adjust rootfs.ext4 size if it’s larger than the partition — or resize with resize2fs after flashing.
+
+✅ How to Use
+
+    Put all files (barebox.bin, zImage, oftree, rootfs.ext4, config-partition.tar.gz) on the SD card.
+
+    Boot into a shell (e.g., minimal Yocto image or rescue Linux).
+
+    Make the script executable:
+
+chmod +x provision-emmc.sh
+
+Run it:
+
+    sudo ./provision-emmc.sh
+
+🧪 Optional Improvements
+
+    Add bootstate marker files inside CONFIG
+
+    Include version files in BOOT0/1 (e.g., version.txt)
+
+    Add integrity check with sha256sum before copying
+
+Let me know if:
+
+    You want a .wic image to automate this with Yocto
+
+    You want this provisioning script to flash to NAND instead of eMMC
+
+    You want me to embed this provisioning step inside the initramfs for automated production
+
+Ready when you are 🚀
