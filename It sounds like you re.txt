@@ -1,0 +1,340 @@
+It sounds like you're trying to install a RAUC bundle on a Yocto-generated image for the PHYTEC phyGATE-Tauri-S board, using an A/B rootfs layout (RAUC system 0/1), with the image running from SD card. However, the rauc install fails with an error like:
+
+    cannot copy to bootloader.0 in /dev/mmcblk0
+
+This issue typically happens because RAUC tries to write to the bootloader slot, and it's either:
+
+    Not properly defined in your RAUC system.conf, or
+
+    Not writable (e.g. SD card is mounted read-only, or your SD image does not expose that partition or doesn't map to a real device).
+
+🔍 Let’s break it down and debug step by step:
+✅ 1. Check your RAUC slot definitions
+
+Open /etc/rauc/system.conf and confirm you have something like this:
+
+[system]
+compatible=phygate-tauri
+bootloader=uboot
+
+[slot.rootfs.0]
+device=/dev/mmcblk0p2
+type=ext4
+mountpoint=/
+
+[slot.rootfs.1]
+device=/dev/mmcblk0p3
+type=ext4
+mountpoint=/
+
+[slot.bootloader.0]
+device=/dev/mmcblk0
+type=raw
+
+If bootloader.0 points to /dev/mmcblk0, RAUC will try to write to the raw device — usually the eMMC. But since you're booting from the SD card, that device (/dev/mmcblk0) might actually point to the SD card, and U-Boot is stored in a specific offset (e.g. at 8 KB or 1 MB).
+
+→ If your bundle does not include a bootloader image, or if you don’t want to overwrite the bootloader, you can remove or comment out [slot.bootloader.0].
+✅ 2. Avoid writing to bootloader on SD card (if not needed)
+
+If you’re not updating U-Boot via RAUC, remove the bootloader.0 definition completely:
+
+# Remove this if not updating bootloader
+#[slot.bootloader.0]
+#device=/dev/mmcblk0
+#type=raw
+
+Then rebuild your system.conf into the RAUC bundle and flash again.
+✅ 3. Understand the device mapping
+
+Check what /dev/mmcblk0 actually refers to:
+
+lsblk
+
+    If you're booting from SD card, it's likely:
+
+        /dev/mmcblk0 → SD card
+
+        /dev/mmcblk1 → eMMC
+
+If RAUC tries to write to /dev/mmcblk0 but it’s not supposed to update SD bootloader, then that’s a problem.
+✅ 4. You’re trying to update from SD – but RAUC is meant to manage eMMC
+
+Most production use cases of RAUC are designed for running the system from eMMC, and using SD/USB/network for updates.
+
+If you’re trying to run from SD card and update eMMC, make sure that your slot definitions in system.conf point to eMMC devices — /dev/mmcblk1pX, not /dev/mmcblk0.
+🔧 Solution Summary:
+✔️ Option 1: Remove bootloader.0 from system.conf
+
+If you don’t plan to update the bootloader with RAUC:
+
+    Remove [slot.bootloader.0] entirely from /etc/rauc/system.conf.
+
+    Rebuild your RAUC bundle (e.g. using rauc-archive or bitbake).
+
+    Try the install again.
+
+✔️ Option 2: Adjust device paths to match the target layout
+
+    If /dev/mmcblk0 is your SD card, and /dev/mmcblk1 is eMMC, then define:
+
+[slot.rootfs.0]
+device=/dev/mmcblk1p2
+...
+
+    And flash your Yocto image to SD only as an installer, not as the live system.
+
+Would you like to share your current system.conf and the output of lsblk or cat /proc/partitions? I can give you a fully fixed version tailored to your setup.
+You said:
+bit if i donnt update th bootloader.0, will rauc know what the most recentslot to boot from and i'm using barebox bootloader
+ChatGPT said:
+
+Great follow-up question — and very important! Since you’re using RAUC with Barebox, and you’re not updating bootloader.0, the key concern becomes:
+
+    ❓ How does Barebox know which slot (system 0 or 1) to boot into after a RAUC update?
+
+The answer depends on how RAUC and Barebox communicate, and the good news is:
+✅ Yes, RAUC can manage A/B switching without updating the bootloader itself — as long as you integrate Barebox-state correctly.
+📌 Let’s clarify how it works step by step:
+🔁 1. RAUC doesn't need to update the bootloader binary — it just needs to update the boot flags
+
+When you define a bootloader=barebox in your system.conf, RAUC uses libbarebox-state to update the boot state via environment variables or state backend, not by rewriting the actual bootloader image.
+
+So you do not need to include [slot.bootloader.0] unless you're physically updating the barebox binary — which you aren’t.
+🧠 2. RAUC and Barebox communicate via state backend (/dev/bbstate, /mnt/barebox-state, or /dev/nvmem/...)
+
+Barebox uses a state backend (like /dev/nvmem/barebox-state or /dev/bbstate) where it stores flags such as:
+
+    system0.bootcount
+
+    system1.bootcount
+
+    system0.try
+
+    system1.try
+
+    system0.good
+
+    system1.good
+
+RAUC updates those flags after installation, and Barebox reads them to decide which slot to boot next.
+
+    ✅ So even without writing to bootloader.0, RAUC updates the boot state using libbarebox, not by overwriting the bootloader image.
+
+🔧 3. Your system.conf should include this:
+
+[system]
+compatible=phygate-tauri
+bootloader=barebox
+
+And not include [slot.bootloader.0].
+
+Then RAUC will only update the state backend to say:
+
+    “boot into system.1 next boot”
+
+    “it’s a trial boot”
+
+    “if successful, mark system.1 as good”
+
+📁 4. Your Yocto build must include:
+
+    barebox-state package
+
+    Proper barebox-state.dtb overlays
+
+    Udev rules to expose /dev/bbstate or /dev/nvmem/...
+
+    Configured mount point if needed (/mnt/barebox-state)
+
+🧪 5. Test it like this:
+
+After you rauc install my-bundle.raucb, do:
+
+rauc status
+
+You should see something like:
+
+Slot rootfs.1 marked as booted and good
+
+Then on next reboot, you verify from Barebox shell or Linux which slot it booted from (mount, cat /proc/cmdline, etc.)
+🟡 Common Gotcha
+
+If you don’t see changes happening, verify that:
+
+    /etc/barebox-state/state.dtb exists
+
+    Your barebox-state tools are installed
+
+    Permissions to /dev/nvmem/* or /dev/bbstate allow write access
+
+✅ TL;DR
+Question	Answer
+Do I need to update bootloader.0?	❌ No, not unless you're changing the actual Barebox binary.
+Will RAUC manage slot switching with Barebox?	✅ Yes, via bootloader=barebox and the state backend.
+How does it work?	RAUC writes state flags (good/try/bootcount) into a backend Barebox reads.
+What do I need in Yocto?	barebox-state, the right device tree bindings, and libbarebox support in RAUC.
+
+Want me to generate a minimal working system.conf + Yocto config snippet tailored for your phygate-tauri-s + Barebox + RAUC A/B setup?
+You said:
+yes with bundle
+ChatGPT said:
+
+Perfect! Let's walk you through a minimal but working RAUC A/B update setup for your PHYTEC phyGATE-Tauri-S with:
+
+    Barebox bootloader
+
+    RAUC A/B layout
+
+    No bootloader updates via RAUC
+
+    Boot from SD during dev
+
+    Install to eMMC (typically)
+
+✅ Step 1: system.conf for RAUC
+
+Here’s a clean, production-ready RAUC configuration file with A/B layout and no bootloader slot.
+
+📄 recipes-core/rauc/files/system.conf
+
+[system]
+compatible=phygate-tauri
+bootloader=barebox
+
+[slot.rootfs.0]
+device=/dev/mmcblk1p2
+type=ext4
+mountpoint=/
+bootname=system0
+
+[slot.rootfs.1]
+device=/dev/mmcblk1p3
+type=ext4
+mountpoint=/
+bootname=system1
+
+Notes:
+
+    mmcblk1 is assumed to be the eMMC.
+
+    bootname must match what Barebox expects in its state backend (system0, system1).
+
+    No bootloader.0 slot, since you don’t update the bootloader.
+
+✅ Step 2: Add to Yocto image
+
+In your custom layer (meta-custom):
+
+📄 meta-custom/recipes-core/rauc/rauc/system.conf (see above)
+
+📄 meta-custom/recipes-core/rauc/rauc_%.bbappend
+
+FILESEXTRAPATHS_prepend := "${THISDIR}/files:"
+SRC_URI += "file://system.conf"
+
+This ensures system.conf is installed in your target image.
+✅ Step 3: Enable RAUC + Barebox-State in your Yocto image
+
+In your local.conf or custom image .bb file:
+
+IMAGE_INSTALL:append = " rauc barebox-state barebox-state-tools"
+
+Also ensure your device tree includes the barebox-state backend.
+✅ Step 4: Barebox + state backend setup
+
+You need Barebox to use a backend like /dev/nvmem/barebox-state or /dev/bbstate.
+
+This is usually defined in your Device Tree, e.g.:
+
+barebox_state: state {
+    compatible = "barebox,state";
+    magic = <0x1234ABCD>;
+    backend = <&barebox_state_backend>;
+    #address-cells = <1>;
+    #size-cells = <1>;
+
+    system0 {
+        reg = <0x0 0x10>;
+        type = "bootstate";
+    };
+
+    system1 {
+        reg = <0x10 0x10>;
+        type = "bootstate";
+    };
+};
+
+    🛠️ PHYTEC may already provide this in their BSP device tree. You just need to ensure it's compiled and exposed in Linux (/dev/nvmem/... or /dev/bbstate).
+
+✅ Step 5: Generate a RAUC bundle
+
+Let’s say you want to update both A/B rootfs partitions.
+
+Here’s a minimal bundle recipe:
+
+📄 meta-custom/recipes-core/rauc-bundle/phygate-bundle.bb
+
+DESCRIPTION = "RAUC update bundle for PHYTEC Tauri"
+LICENSE = "MIT"
+
+inherit rauc-bundle
+
+RAUC_BUNDLE_COMPATIBLE = "phygate-tauri"
+RAUC_BUNDLE_VERSION = "1.0"
+RAUC_BUNDLE_SLOTS = "rootfs.0 rootfs.1"
+
+RAUC_SLOT_rootfs_0 = "image-rauc.ext4"
+RAUC_SLOT_rootfs_1 = "image-rauc.ext4"
+
+You need to build a copy of your rootfs image (or two identical ones) named image-rauc.ext4.
+
+Then build the bundle:
+
+bitbake phygate-bundle
+
+It will generate something like:
+
+tmp/deploy/images/<machine>/phygate-bundle.raucb
+
+✅ Step 6: Test install from target
+
+    Copy the .raucb file to the target (e.g. via scp or SD card).
+
+    SSH into target and run:
+
+rauc install /path/to/phygate-bundle.raucb
+
+If everything is setup correctly, you should see:
+
+Installing `/path/to/phygate-bundle.raucb`...
+Verifying bundle...
+Installing `rootfs.1` to `/dev/mmcblk1p3`...
+Marking slot `rootfs.1` as bootable...
+Success
+
+Then reboot and verify the new slot is used.
+🧪 Extra: Verify state integration
+
+barebox-state -l  # list known states
+barebox-state -p  # print current values
+
+Should show values like:
+
+system0.good = true
+system1.try = true
+
+🔧 Want full example BSP snippets?
+
+I can provide:
+
+    A working meta-rauc config patch for your BSP
+
+    A meta-custom bundle that builds properly
+
+    A .bbclass for slot duplication if you want different images per slot (e.g. system.0 = stable, system.1 = test)
+
+Let me know if you want these! Or, if you're okay sharing your current layer structure or machine name, I can inject these directly into your setup.
+Is this conversation helpful so far?
+
+
+ChatGPT can make mistakes. Check important info.
