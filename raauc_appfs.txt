@@ -1,0 +1,775 @@
+Great! You're working on a Yocto image for the PhyGATE-Tauri S with RAUC support and a dedicated appfs partition for specific applications. That’s a solid use case for managing updates and keeping app data separate. Here's a breakdown of what you typically need to set this up properly.
+✅ High-Level Goals
+
+    Yocto-based image for the PhyGATE-Tauri S.
+
+    RAUC integration for A/B updates or single-slot OTA.
+
+    Additional appfs partition mounted separately for your application binaries/data.
+
+🧩 1. RAUC Integration
+
+Make sure the following is in place:
+local.conf additions:
+
+DISTRO_FEATURES:append = " rauc"
+IMAGE_INSTALL:append = " rauc"
+
+Layers needed:
+
+Ensure you include meta-rauc, and optionally meta-security.
+
+bitbake-layers add-layer ../meta-rauc
+
+Add a RAUC bundle recipe and keypair
+
+You'll need to define:
+
+    a rauc-bundle.bb recipe
+
+    certificates/keys in recipes-support/rauc/files/
+
+And in your machine’s image recipe, add:
+
+RAUC_KEY_FILE = "file://cert.pem"
+RAUC_CERT_FILE = "file://cert.pem"
+
+🧩 2. appfs Partition
+
+You need to customize the partition layout via WIC (or legacy IMAGE_BOOT_FILES if you're not using WIC).
+Step-by-step:
+a. Create a WIC file (e.g. my-image.wks)
+
+part /boot --source bootimg-partition --ondisk mmcblk0 --fstype=vfat --label boot --active --align 4
+part / --source rootfs --ondisk mmcblk0 --fstype=ext4 --label rootfs --align 4
+part /appfs --source rootfs --fstype=ext4 --label appfs --size 256 --ondisk mmcblk0 --align 4
+
+You can also use --source rawcopy for a blank or pre-populated partition.
+b. In local.conf:
+
+IMAGE_FSTYPES += "wic"
+WKS_FILE = "my-image.wks"
+
+c. Add fstab entries (or use systemd mount units)
+
+If you're using systemd, create a mount unit:
+
+# appfs.mount
+[Unit]
+Description=Mount appfs partition
+After=local-fs.target
+
+[Mount]
+What=/dev/disk/by-label/appfs
+Where=/appfs
+Type=ext4
+Options=defaults
+
+[Install]
+WantedBy=multi-user.target
+
+Then install that file from a recipe or via IMAGE_INSTALL.
+🧩 3. Populate appfs with Apps
+
+You have two main options:
+
+    Blank Partition — apps are updated externally (e.g. downloaded by the system).
+
+    Pre-populated — use a ROOTFS_POSTPROCESS_COMMAND to copy files from your build.
+
+For example:
+
+do_image_append() {
+    mkdir -p ${IMAGE_ROOTFS}/appfs
+    install -m 0755 ${THISDIR}/files/myapp ${IMAGE_ROOTFS}/appfs/
+}
+
+Or you could build a separate appfs image and reference it with --source rawcopy.
+🧩 4. RAUC and appfs Interaction
+
+You usually do not include appfs in the RAUC bundle, unless you want to manage it with updates.
+
+If you do want that, create a new slot in the RAUC manifest:
+
+"appfs": {
+    "device": "/dev/mmcblk0p3",
+    "type": "raw",
+    "bootname": "appfs"
+}
+
+And generate/apply the bundle accordingly.
+✅ Summary
+Component	Setup Step
+RAUC Support	Add meta-rauc, set keys, enable in image
+Custom Partition	WIC .wks file + systemd mount or /etc/fstab
+Apps in appfs	Blank or pre-filled via image post-processing or rawcopy
+RAUC + appfs	Optionally include in RAUC manifest as a dedicated slot
+
+If you’d like, I can:
+
+    generate a WKS file for you,
+
+    create the mount unit,
+
+    or help configure RAUC manifest files.
+
+Just let me know where you're at or what parts you’d like help with.
+You said:
+i  generated  a toolchain to compile the apps and i want to use them from appfs
+ChatGPT said:
+
+Could you share more detail on how you plan to use the toolchain and apps in the appfs partition? For example:
+
+    Are the apps compiled on your development PC using the toolchain, and then copied to the appfs partition?
+
+    Should the Yocto image include a pre-populated appfs partition with the apps, or will it remain empty and apps be added later (e.g. OTA or SCP)?
+
+    Are the apps dynamically linked (do they need runtime libraries from the image), or are they fully static?
+
+    Should appfs be mounted at boot, and do you want apps from there to be added to $PATH automatically?
+
+Once I know a bit more, I can guide you precisely on how to integrate and use the compiled apps from appfs.
+You said:
+the apps compiled on my development PC using the toolchain, and then copied to the appfs partition
+ChatGPT said:
+
+Perfect — thanks for clarifying!
+
+So your flow is:
+
+    ✅ Apps are cross-compiled on your dev PC using the Yocto-generated toolchain.
+
+    ✅ You copy these apps manually (or via script) into the appfs partition.
+
+    🔜 You want the target system (PhyGATE-Tauri S) to mount appfs at boot and run apps from there.
+
+Let’s walk through how to mount and use those apps cleanly from appfs.
+✅ 1. Cross-Compiling Your Apps (recap)
+
+You’ve likely done something like this:
+
+source /opt/poky/2.6.4/environment-setup-armv7at2hf-neon-phyboard-tauris
+arm-poky-linux-gnueabi-gcc -o myapp myapp.c
+
+That produces an executable (myapp) for the target.
+📦 2. Pre-Fill the appfs Partition
+
+There are 3 ways to get your apps onto appfs:
+Option A – Manually copy (SD card or NFS mount):
+
+    Format the appfs partition as ext4.
+
+    Mount it:
+
+mount /dev/mmcblk0p3 /mnt
+
+Copy apps:
+
+    cp myapp /mnt/
+
+Option B – Automatically include your apps into the appfs during image build:
+
+    Create a recipe like myapps.bb to install compiled apps into a folder like ${D}/appfs/
+
+    Use --source rawcopy in WIC to include that folder in the partition.
+
+Option C – Scripted after first boot:
+
+    Create a post-install or provisioning script that populates appfs from a USB or over the network.
+
+Let me know if you want help with any of these.
+📂 3. Mount appfs at Boot
+
+You can mount it cleanly using systemd (recommended) or /etc/fstab.
+Option A – Systemd Mount Unit
+
+Create a unit file appfs.mount:
+
+[Unit]
+Description=Mount appfs partition
+After=local-fs.target
+
+[Mount]
+What=/dev/disk/by-label/appfs
+Where=/appfs
+Type=ext4
+Options=defaults
+
+[Install]
+WantedBy=multi-user.target
+
+Place it in:
+
+/etc/systemd/system/appfs.mount
+
+Then run:
+
+systemctl enable appfs.mount
+
+Option B – fstab entry
+
+In /etc/fstab, add:
+
+/dev/disk/by-label/appfs  /appfs  ext4  defaults  0  2
+
+⚙️ 4. Run Apps from appfs
+
+Let’s say you copied /appfs/myapp.
+Option A – Run directly:
+
+/appfs/myapp
+
+Option B – Add to $PATH dynamically
+
+Create a file like /etc/profile.d/appfs.sh:
+
+#!/bin/sh
+export PATH=$PATH:/appfs
+
+Or if you're using systemd-based shells, you can set DefaultEnvironment= in a systemd drop-in.
+✅ Summary
+Task	Setup
+Compile apps	Use Yocto SDK or external toolchain
+Copy to appfs	Manually (via SD/NFS), auto in image (via rawcopy), or OTA
+Mount appfs	Use systemd unit or /etc/fstab
+Use apps	Run with full path or add /appfs to $PATH
+
+Would you like me to:
+
+    Write a ready-to-use WIC file with appfs support?
+
+    Provide a sample systemd .mount unit and recipe to install it?
+
+    Or help create a Yocto recipe to bundle your apps into appfs?
+
+Just let me know how far you'd like to automate this.
+You said:
+Yocto image include a pre-populated appfs partition with the apps
+ChatGPT said:
+
+Awesome — so you want your Yocto-built image to include a pre-populated appfs partition with your cross-compiled apps already inside it.
+
+Let’s do this properly with WIC + rawcopy and a custom Yocto recipe to collect the apps during image build.
+✅ Final Goal
+
+You’ll end up with:
+
+    A *.wic image with 3 partitions: boot, rootfs, and appfs.
+
+    appfs (label: appfs) contains your apps like /myapp, /mydaemon, etc.
+
+    At runtime, the target mounts /dev/disk/by-label/appfs at /appfs, and apps are ready.
+
+🧩 STEP 1 — Create a Directory to Hold the App Files
+
+Create a Yocto recipe, say in recipes-apps/myapps/myapps.bb:
+
+SUMMARY = "My precompiled apps to go into appfs"
+LICENSE = "CLOSED"
+SRC_URI = "file://myapp \
+           file://mydaemon"
+
+S = "${WORKDIR}"
+
+do_install() {
+    install -d ${D}/appfs
+    install -m 0755 ${WORKDIR}/myapp ${D}/appfs/
+    install -m 0755 ${WORKDIR}/mydaemon ${D}/appfs/
+}
+
+FILES:${PN} = "/appfs"
+
+📝 Place your precompiled binaries in recipes-apps/myapps/files/.
+
+Then add the layer if needed:
+
+bitbake-layers add-layer ../meta-myapps
+
+🧩 STEP 2 — Create a Separate appfs Image
+
+You need to define a custom image recipe that builds only the content of appfs, for example:
+
+Create recipes-core/images/appfs-image.bb:
+
+DESCRIPTION = "Image containing only appfs apps"
+LICENSE = "CLOSED"
+
+inherit core-image
+
+IMAGE_INSTALL = "myapps"
+IMAGE_LINGUAS = ""
+
+IMAGE_ROOTFS_SIZE = "8192"
+IMAGE_FSTYPES = "ext4"
+
+Build it like this:
+
+bitbake appfs-image
+
+This gives you: tmp/deploy/images/<machine>/appfs-image-<machine>.ext4
+🧩 STEP 3 — Use a Custom WKS File with rawcopy
+
+Create a custom .wks file, e.g. myimage.wks:
+
+part /boot --source bootimg-partition --ondisk mmcblk0 --fstype=vfat --label boot --active --align 4
+part / --source rootfs --ondisk mmcblk0 --fstype=ext4 --label rootfs --align 4
+part /appfs --source rawcopy --ondisk mmcblk0 --label appfs --align 4 --sourceparams="file=appfs-image.ext4"
+
+📌 Important:
+
+    The --source rawcopy tells Yocto to inject an existing .ext4 into the partition.
+
+    You must place appfs-image.ext4 in the same directory where WIC looks (DEPLOY_DIR_IMAGE).
+
+🧩 STEP 4 — Modify local.conf to Use the Custom .wks
+
+In your conf/local.conf:
+
+WKS_FILE = "myimage.wks"
+IMAGE_FSTYPES:append = " wic"
+
+🧩 STEP 5 — Mount appfs at Boot (Systemd)
+
+Use a systemd mount unit:
+
+Create a file: recipes-core/base-files/appfs-mount.bbappend
+
+FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
+
+SRC_URI += "file://appfs.mount"
+
+do_install:append() {
+    install -Dm 0644 ${WORKDIR}/appfs.mount ${D}${systemd_system_unitdir}/appfs.mount
+}
+
+SYSTEMD_SERVICE:${PN} = "appfs.mount"
+inherit systemd
+
+Inside files/appfs.mount:
+
+[Unit]
+Description=Mount appfs partition
+After=local-fs.target
+
+[Mount]
+What=/dev/disk/by-label/appfs
+Where=/appfs
+Type=ext4
+Options=defaults
+
+[Install]
+WantedBy=multi-user.target
+
+✅ At the End
+
+You’ll be able to:
+
+    Boot your PhyGATE-Tauri S.
+
+    /appfs will be mounted.
+
+    Precompiled apps from your dev PC (bundled during Yocto build) will already be there.
+
+Want Me to Generate Sample Files?
+
+Let me know if you’d like me to:
+
+    Generate myapps.bb, appfs-image.bb, and myimage.wks as ready-to-copy files.
+
+    Write a shell script to copy your compiled apps into the Yocto build directory before bitbake.
+
+    Help with systemd services or launchers for your apps inside /appfs.
+
+Just say the word!
+You said:
+i have RAUC_SLOT_appfs no image defined
+ChatGPT said:
+
+Perfect — you’re almost there! That error:
+
+    RAUC_SLOT_appfs: no image defined
+
+…means that RAUC is configured to expect an image for a slot named appfs, but you haven’t yet told Yocto what image to use for that slot.
+
+Let’s fix that by:
+✅ Step-by-Step: Define RAUC_SLOT_appfs
+🧩 1. Build a Yocto image for appfs
+
+Let’s assume you already created a minimal image for your apps, like this:
+
+appfs-image
+
+This will produce something like:
+
+tmp/deploy/images/<machine>/appfs-image-<machine>.ext4
+
+🧩 2. Define the RAUC slot appfs in local.conf or image.bb
+
+Add this to your local.conf, distro.conf, or inside your main image .bb file:
+
+RAUC_SLOT_appfs = "appfs-image"
+
+This line tells Yocto + RAUC:
+
+    For the appfs slot, use the output of the appfs-image BitBake target.
+
+✅ This resolves the "no image defined" error.
+🧩 3. Declare the slot in your RAUC bundle recipe (*.raucb)
+
+Your bundle.bb file should look like this (simplified):
+
+require recipes-support/rauc/rauc.inc
+
+RAUC_BUNDLE_SLOTS = "rootfs appfs"
+RAUC_SLOT_rootfs = "core-image-minimal"
+RAUC_SLOT_appfs = "appfs-image"
+
+# Optional if you want to include boot too
+RAUC_SLOT_boot = "bootfs-image" 
+
+Then in your manifest.json (included in the RAUC bundle), declare the slots:
+
+{
+  "compatible": "phyboard-tauri",
+  "version": "v2025.04",
+  "slots": {
+    "rootfs": {
+      "device": "/dev/mmcblk0p2",
+      "type": "ext4"
+    },
+    "appfs": {
+      "device": "/dev/mmcblk0p3",
+      "type": "ext4"
+    }
+  }
+}
+
+Make sure appfs is also defined in your .wks partition layout.
+🧩 4. Build Your RAUC Bundle
+
+bitbake rauc-bundle
+
+Now RAUC will include the appfs-image.ext4 in the bundle, and you can update it alongside rootfs (or independently depending on your setup).
+✅ Summary
+What you want	What to do
+Fix RAUC_SLOT_appfs error	Add RAUC_SLOT_appfs = "appfs-image" in config
+Use image for appfs	Create appfs-image.bb to generate a .ext4
+Include in bundle	Add appfs to RAUC_BUNDLE_SLOTS in your recipe
+Manifest slot info	Define appfs device and type in manifest.json
+
+If you want, I can:
+
+    Write a working appfs-image.bb file for your apps,
+
+    Provide an example manifest.json,
+
+    Or show how to update only appfs via RAUC.
+
+Just say the word!
+You said:
+ive me a complte appfs-image
+ChatGPT said:
+
+Great! Here's a complete and ready-to-use appfs-image.bb recipe for your Yocto project. This recipe will:
+
+    Create an ext4 image.
+
+    Pre-populate it with your precompiled apps (from a recipe like myapps).
+
+    Be usable in your RAUC appfs slot and your .wic layout with --source rawcopy.
+
+✅ recipes-core/images/appfs-image.bb
+
+SUMMARY = "Image containing user applications to be deployed to appfs partition"
+DESCRIPTION = "This image contains precompiled user-space applications, installed to be mounted under /appfs"
+LICENSE = "MIT"
+IMAGE_INSTALL = "myapps"  # Replace with your real app recipe
+IMAGE_LINGUAS = ""
+
+inherit core-image
+
+# We just want the ext4 image, nothing else
+IMAGE_FSTYPES = "ext4"
+
+# Optional: define the rootfs size explicitly (in KB)
+IMAGE_ROOTFS_SIZE = "65536"  # 64MB for example
+
+# Disable init system and other default rootfs settings
+IMAGE_FEATURES = ""
+DISTRO_FEATURES:remove = "x11 wayland"
+PACKAGE_INSTALL = "${IMAGE_INSTALL}"
+
+# Reduce overhead
+IMAGE_ROOTFS_EXTRA_SPACE = "0"
+IMAGE_OVERHEAD_FACTOR = "1.0"
+
+✅ myapps.bb example (minimal recipe)
+
+In recipes-apps/myapps/myapps.bb, assuming you've cross-compiled your apps and placed them in files/:
+
+SUMMARY = "My precompiled apps to go into appfs"
+LICENSE = "CLOSED"
+SRC_URI = "file://myapp \
+           file://mydaemon"
+
+S = "${WORKDIR}"
+
+do_install() {
+    install -d ${D}/app
+    install -m 0755 ${WORKDIR}/myapp ${D}/app/
+    install -m 0755 ${WORKDIR}/mydaemon ${D}/app/
+}
+
+FILES:${PN} = "/app"
+
+📝 That will result in /app/myapp and /app/mydaemon inside the appfs-image.ext4.
+✅ Use in RAUC and WIC
+
+    RAUC slot setup:
+
+RAUC_BUNDLE_SLOTS = "rootfs appfs"
+RAUC_SLOT_appfs = "appfs-image"
+
+    WIC layout (example myimage.wks):
+
+part /boot --source bootimg-partition --ondisk mmcblk0 --fstype=vfat --label boot --active --align 4
+part / --source rootfs --ondisk mmcblk0 --fstype=ext4 --label rootfs --align 4
+part /appfs --source rawcopy --ondisk mmcblk0 --label appfs --align 4 --sourceparams="file=appfs-image.ext4"
+
+✅ Build
+
+To build the appfs partition:
+
+bitbake appfs-image
+
+You’ll get:
+
+tmp/deploy/images/<machine>/appfs-image-<machine>.ext4
+
+✅ Mount on target
+
+Mount the partition on target automatically with a systemd mount unit (as mentioned earlier), or:
+
+mount /dev/disk/by-label/appfs /appfs
+
+And your apps will be ready to run under /appfs.
+
+Would you like me to:
+
+    Generate a systemd .mount unit recipe for /appfs?
+
+    Help you integrate this into a RAUC bundle?
+
+    Create a wic layout that uses this image?
+
+Just tell me what part you’d like next!
+You said:
+ integrate this into a RAUC bundle?
+ChatGPT said:
+
+Perfect — let’s integrate your appfs-image into a RAUC bundle, so that it’s OTA-updatable just like rootfs.
+✅ GOAL
+
+You’ll have a *.raucb bundle that includes:
+
+    ✅ rootfs-image.ext4 (for the root partition)
+
+    ✅ appfs-image.ext4 (for the appfs partition)
+
+    ✅ A manifest (manifest.json) that RAUC uses to flash the images to the correct partitions
+
+🧩 STEP 1 — Define RAUC slots in your bundle recipe
+
+Assuming your RAUC bundle recipe is in something like:
+recipes-support/rauc/phyboard-bundle.bb
+
+Here’s the complete working example:
+
+SUMMARY = "RAUC bundle for PhyGATE-Tauri with rootfs and appfs"
+LICENSE = "MIT"
+
+inherit rauc-bundle
+
+RAUC_BUNDLE_COMPATIBLE = "phyboard-tauri"
+RAUC_BUNDLE_VERSION = "v2025.04"
+
+RAUC_BUNDLE_SLOTS = "rootfs appfs"
+RAUC_SLOT_rootfs = "core-image-minimal"   # or your real rootfs image
+RAUC_SLOT_appfs = "appfs-image"
+
+# This is optional — use if you include keys for signing
+RAUC_KEY_FILE = "file://cert.pem"
+RAUC_CERT_FILE = "file://cert.pem"
+
+✅ This tells Yocto: include both images, and sign if certs are available.
+🧩 STEP 2 — Create your manifest.json
+
+Put this in recipes-support/rauc/files/manifest.json:
+
+{
+  "version": "v2025.04",
+  "compatible": "phyboard-tauri",
+  "build": "yocto-bundle",
+  "slots": {
+    "rootfs": {
+      "device": "/dev/mmcblk0p2",
+      "type": "ext4"
+    },
+    "appfs": {
+      "device": "/dev/mmcblk0p3",
+      "type": "ext4"
+    }
+  }
+}
+
+✅ This maps each image to the correct partition on your device.
+
+If you are doing A/B updates, the slot names will change (like rootfs.0, appfs.0, etc.), but this works for single-slot setups.
+🧩 STEP 3 — Add the files to your SRC_URI
+
+In your phyboard-bundle.bb, add:
+
+SRC_URI += "file://manifest.json"
+
+Make sure it’s in the right files/ path relative to the recipe.
+🧩 STEP 4 — Build the RAUC bundle
+
+bitbake phyboard-bundle
+
+Output:
+
+tmp/deploy/images/<machine>/phyboard-bundle-<machine>.raucb
+
+✅ You can now flash or deploy this bundle via RAUC:
+
+rauc install /mnt/usb/phyboard-bundle.raucb
+
+Or over the network via RAUC service (e.g. D-Bus or shell integration).
+🧩 STEP 5 — Ensure Partitions Exist and Are Labeled
+
+Your .wic file must define and label both partitions correctly:
+
+part / --source rootfs --ondisk mmcblk0 --fstype=ext4 --label rootfs --align 4
+part /appfs --source rawcopy --ondisk mmcblk0 --label appfs --align 4 --sourceparams="file=appfs-image.ext4"
+
+If the RAUC bundle is deployed but the label doesn’t match, it won’t work.
+✅ Summary of What You Need
+Item	Required?	Example
+appfs-image.bb	✅	Installs apps into /app
+RAUC_SLOT_appfs	✅	RAUC_SLOT_appfs = "appfs-image"
+RAUC_BUNDLE_SLOTS	✅	"rootfs appfs"
+manifest.json	✅	Maps slot names to /dev/mmcblk0pX
+.wic partition labels	✅	Must use --label appfs
+rauc install	✅	Installs .raucb bundle on target
+
+Would you like me to:
+
+    Generate a real working phyboard-bundle.bb file for you?
+
+    Include certificate signing setup?
+
+    Provide a test script to validate that appfs updated correctly after RAUC install?
+
+Let me know how far you'd like to go!
+You said:
+Provide a test script to validate that appfs updated correctly after RAUC install
+ChatGPT said:
+
+Excellent choice — validating the update of appfs after a RAUC install is a crucial step. Below is a complete test script you can run on the target device to verify:
+✅ RAUC appfs Update Validation Script
+📄 check_appfs_update.sh
+
+#!/bin/sh
+
+APPFS_MOUNTPOINT="/appfs"
+EXPECTED_FILES="myapp mydaemon"  # Update this based on your appfs content
+LOG="/tmp/appfs_update_check.log"
+
+echo "[INFO] Starting RAUC appfs update verification..." | tee $LOG
+
+# Step 1: Ensure the partition is mounted
+if ! mountpoint -q "$APPFS_MOUNTPOINT"; then
+    echo "[INFO] $APPFS_MOUNTPOINT is not mounted. Attempting to mount..." | tee -a $LOG
+    mount /dev/disk/by-label/appfs "$APPFS_MOUNTPOINT"
+    if [ $? -ne 0 ]; then
+        echo "[ERROR] Failed to mount /appfs" | tee -a $LOG
+        exit 1
+    fi
+else
+    echo "[INFO] $APPFS_MOUNTPOINT is already mounted." | tee -a $LOG
+fi
+
+# Step 2: List content
+echo "[INFO] Contents of $APPFS_MOUNTPOINT:" | tee -a $LOG
+ls -l "$APPFS_MOUNTPOINT" | tee -a $LOG
+
+# Step 3: Check for expected files
+ALL_PRESENT=true
+for FILE in $EXPECTED_FILES; do
+    if [ ! -x "$APPFS_MOUNTPOINT/$FILE" ]; then
+        echo "[ERROR] Missing or non-executable file: $FILE" | tee -a $LOG
+        ALL_PRESENT=false
+    else
+        echo "[OK] Found $FILE" | tee -a $LOG
+    fi
+done
+
+# Step 4: Run test apps (optional)
+for FILE in $EXPECTED_FILES; do
+    echo "[INFO] Running $FILE to check for runtime errors..." | tee -a $LOG
+    "$APPFS_MOUNTPOINT/$FILE" --version 2>&1 | tee -a $LOG
+done
+
+# Step 5: Summary
+if $ALL_PRESENT; then
+    echo "[SUCCESS] All expected files are present in /appfs." | tee -a $LOG
+    exit 0
+else
+    echo "[FAIL] One or more expected files are missing or not executable." | tee -a $LOG
+    exit 2
+fi
+
+🛠️ How to Use
+1. Deploy to target:
+
+scp check_appfs_update.sh root@<target-ip>:/tmp/
+
+2. Make executable:
+
+chmod +x /tmp/check_appfs_update.sh
+
+3. Run after rauc install and reboot:
+
+/tmp/check_appfs_update.sh
+
+🧪 Sample Output
+
+[INFO] Starting RAUC appfs update verification...
+[INFO] /appfs is already mounted.
+[INFO] Contents of /appfs:
+-rwxr-xr-x 1 root root 10240 Apr 14 10:12 myapp
+-rwxr-xr-x 1 root root  5120 Apr 14 10:12 mydaemon
+[OK] Found myapp
+[OK] Found mydaemon
+[INFO] Running myapp to check for runtime errors...
+myapp version 1.0
+[INFO] Running mydaemon to check for runtime errors...
+mydaemon version 2.1
+[SUCCESS] All expected files are present in /appfs.
+
+🧠 Bonus Ideas (Optional)
+
+    ✅ Add a checksum comparison for strong validation (md5sum of known builds).
+
+    ✅ Log the RAUC status to confirm bundle version:
+
+rauc status | grep -A1 "appfs"
+
+    ✅ Extend the script for automated post-update tests (e.g., validate service startup).
+
+Want me to integrate this into Yocto as a test recipe or add it to the image as /usr/bin/check-appfs?
+
+Let me know how you'd like to proceed!
+
+
+ChatGPT can make mistakes. Check important info.
