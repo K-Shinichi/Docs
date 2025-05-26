@@ -1,0 +1,142 @@
+📅 Plan d’apprentissage hebdomadaire – Opérationnel Smart Grid Energy (Agrégateur RTE)
+✅ Semaine 1 : Bases du système électrique français
+
+    Suivre le MOOC "Système électrique" (FUN) – 3 à 4 modules
+
+    Lire la brochure RTE : Les mécanismes d’ajustement
+
+    Étudier le rôle de RTE, Enedis, producteurs, consommateurs
+
+    Faire un schéma global de la chaîne énergie (production → consommation)
+
+✅ Semaine 2 : Mécanismes de flexibilité et NEBEF
+
+    Lire le guide NEBEF complet (RTE)
+
+    Comprendre la logique : effacement → notification → valorisation
+
+    Étudier un exemple : effacement industriel de 2 MW → simulation de gain
+
+    Créer un tableau Excel avec appels, puissances effacées, gains simulés
+
+✅ Semaine 3 : Réserves (FCR, aFRR) et marché de capacité
+
+    Lire les documents RTE sur les réserves de puissance
+
+    Comprendre les différences FCR / aFRR / mFRR / RR
+
+    Lire une note sur le marché de capacité (fiche RTE ou CRE)
+
+    Synthèse personnelle : 1 page de résumé des 4 mécanismes
+
+✅ Semaine 4 : Suivi de portefeuille – Power BI
+
+    Installer Power BI Desktop
+
+    Charger un fichier de consommation par site (CSV)
+
+    Créer :
+
+        un graphique par site/jour
+
+        une jauge de performance
+
+        un tableau de performance moyenne hebdomadaire
+
+✅ Semaine 5 : Python pour automatiser
+
+    Suivre un cours Python débutant (OpenClassrooms ou W3Schools)
+
+    Écrire :
+
+        un script de lecture CSV
+
+        un calcul automatique d’écart (consigne – réalisé)
+
+        un message d’alerte si écart > 10%
+
+    Bonus : exporter les alertes dans un fichier texte
+
+✅ Semaine 6 : SQL et base de données
+
+    Installer PostgreSQL localement
+
+    Créer une table : site, date_heure, consigne_MW, realise_MW
+
+    Faire des requêtes :
+
+        moyenne par site
+
+        sites avec écart > 15%
+
+        performance globale
+
+✅ Semaine 7 : Scénarios NEBEF – simulation complète
+
+    Simuler 3 effacements NEBEF sur Excel
+
+    Ajouter : date, site, consigne, réalisé, écart, valeur en euros
+
+    Créer un rapport de synthèse automatique avec Power BI
+
+    Écrire un petit texte expliquant les écarts
+
+✅ Semaine 8 : SCADA / EMS – culture outils terrain
+
+    Lire : Qu’est-ce qu’un SCADA ? (Schneider / Siemens)
+
+    Comprendre le rôle des points de télérelève, seuils, alarmes
+
+    Faire une maquette (papier ou Excel) avec les indicateurs utiles :
+
+        Etat ON/OFF
+
+        Puissance appelée / réalisée
+
+        Dernier ping
+
+✅ Semaine 9 : Répondre à un appel d’offre RTE
+
+    Lire un exemple de documentation d’appel d’offre FCR
+
+    Créer une "fiche site" pour 5 actifs (nom, puissance, contraintes)
+
+    Faire une offre simulée : plage horaire + puissance + prix
+
+    Écrire un résumé de réponse (1/2 page)
+
+✅ Semaine 10 : Automatiser les rapports (Python + Excel)
+
+    Créer un script Python :
+
+        Ouvre un fichier Excel
+
+        Calcule les performances journalières
+
+        Génère un fichier texte récapitulatif
+
+    Option : envoie automatique par mail (SMTP)
+
+✅ Semaine 11 : Certification / Validation
+
+    Suivre les derniers modules du MOOC Smart Grids (FUN)
+
+    Réviser le code de l’énergie (NEBEF, capacité, réserve)
+
+    Quiz perso : 20 questions sur les mécanismes RTE (à préparer)
+
+✅ Semaine 12 : Projet final – simulation complète
+
+    Préparer un dossier complet de simulation :
+
+        1 portefeuille fictif de 10 sites
+
+        1 déclaration NEBEF simulée
+
+        1 tableau Excel avec résultats
+
+        1 rapport Power BI
+
+        1 script Python associé
+
+    Présenter à l’écrit (1 page max) : "Comment je gère un portefeuille NEBEF chez un agrégateur"
