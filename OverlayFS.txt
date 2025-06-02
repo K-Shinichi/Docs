@@ -1,0 +1,485 @@
+Yes, your problem is very common in embedded systems using Yocto and RAUC for updates: you make runtime changes (e.g. changing /etc/passwd, creating files in /home, etc.) after flashing the image, but those changes get lost when updating the rootfs via RAUC.
+
+To preserve these changes across rootfs updates, here are several approaches you can combine:
+✅ 1. Split your system into a persistent /data partition
+✔️ Concept:
+
+You separate all mutable (changeable) data into a dedicated partition (e.g., /data) mounted at runtime. You configure your system so that:
+
+    /home, /etc, and other changeable directories are either symlinked to /data or bind-mounted.
+
+    Only immutable system files live in your read-only rootfs (/), updated via RAUC.
+
+✔️ Implementation:
+
+    In Yocto, create a separate image partition (e.g., ext4) for /data.
+
+    In your init script (/etc/fstab or systemd mount units), mount this partition at boot.
+
+    Overlay or symlink critical paths:
+
+ln -s /data/etc /etc
+ln -s /data/home /home
+
+Or use overlayfs:
+
+    overlayroot
+    ├── lowerdir: /etc (from rootfs)
+    ├── upperdir: /data/etc
+    └── mount: /etc
+
+    🔧 Yocto hint: You can add the partition via WKS_FILE for .wic generation, or RAUC's bundle layout.
+
+✅ 2. Use RAUC data bundle (hooks or post-install scripts)
+
+RAUC supports post-install scripts (hooks) that can re-apply changes after installing the new rootfs.
+✔️ Example:
+
+Inside your RAUC bundle:
+
+/hooks/post-install
+
+And in that script:
+
+#!/bin/sh
+
+# Restore config backups or copy persisted files
+cp /data/config_backup/sshd_config /etc/ssh/sshd_config
+cp /data/config_backup/my_apache2_conf /etc/apache2/apache2.conf
+
+# Restore user data
+cp -r /data/home /home
+
+    ✅ Ensure data partition is not formatted during RAUC update.
+
+✅ 3. Use configuration management (if your device has connectivity)
+
+Use tools like Ansible, Salt, or custom scripts triggered post-install to reconfigure the system automatically over SSH after flashing.
+
+This works well if:
+
+    You have network access to the device.
+
+    You maintain versioned configuration in Git.
+
+✅ 4. Layer-based approach in Yocto
+
+Some of your scripts may do things that should have been built into the Yocto image:
+
+    Setting root password → use EXTRA_USERS_PARAMS
+
+    SSH config → set in a Yocto .bbappend or custom recipe
+
+    Adding files to /home → include via ROOTFS_POSTPROCESS_COMMAND or .bb recipes
+
+This way, changes are:
+
+    Versioned
+
+    Reproducible
+
+    Automatically present in next image
+
+✅ Best practice: Separate your rootfs and state
+Partition	Purpose	Updated by RAUC?
+/	Immutable system files (read-only)	✅ Yes
+/data	Persistent data, logs, configs	❌ No
+/home	User data	❌ No
+✅ Summary – to preserve changes across rootfs update:
+Technique	Purpose	Difficulty
+🔹 /data partition	Store user configs, home, logs	Medium
+🔹 OverlayFS on /etc	Allow runtime modifications of config files	Medium
+🔹 RAUC post-install hook	Restore files/configs automatically after update	Easy
+🔹 Integrate into Yocto build	Avoid runtime hacks by baking in configs	Medium
+🔹 Configuration management	Automate post-update reconfiguration	Medium
+
+If you show me the partition layout or wks file you use, I can help you implement this in your specific Yocto/RAUC setup.
+You said:
+api-version: 1
+disklabel: msdos
+
+mmc:
+  boot-partitions:
+    enable: 1
+    binaries:
+      - input-offset: 0
+        output-offset: 0
+        input:
+          filename: barebox.bin
+          md5sum: 46b1db79bc81e7af11b29436fb7a2515
+          sha256sum: a4d0b0802fc30fbdc987def1975f665190aa35af64fcd9dae26fc1b121c71966
+
+clean:
+  - offset: 3840KiB
+    size: 64KiB
+  - offset: 3960KiB
+    size: 64KiB
+
+raw:
+  - input-offset: 1kiB
+    output-offset: 1kiB
+    input:
+      filename: barebox.bin
+      md5sum: 46b1db79bc81e7af11b29436fb7a2515
+      sha256sum: a4d0b0802fc30fbdc987def1975f665190aa35af64fcd9dae26fc1b121c71966
+
+partitions:
+  - label: BOOT0
+    type: primary
+    filesystem: fat32
+    size: 64MiB
+    offset: 4MiB
+    input:
+      - filename: zImage
+        md5sum: 03d010a6850653344b7120da813ef282
+        sha256sum: 545420a94b3e7d92e61d87523fc263f5abe7820b144e5e444f59f345adb87762
+      - filename: oftree
+        md5sum: a48a06a5c3fbbfb89f0591710ca120c0
+        sha256sum: c40b7c2f6e669aea45385eaec60a0af4a7f7a328c0bef6ab2a173bf6143da61e
+
+  - label: BOOT1
+    type: primary
+    filesystem: fat32
+    size: 64MiB
+    input:
+      - filename: zImage
+        md5sum: 03d010a6850653344b7120da813ef282
+        sha256sum: 545420a94b3e7d92e61d87523fc263f5abe7820b144e5e444f59f345adb87762
+      - filename: oftree
+        md5sum: a48a06a5c3fbbfb89f0591710ca120c0
+        sha256sum: c40b7c2f6e669aea45385eaec60a0af4a7f7a328c0bef6ab2a173bf6143da61e
+
+  - label: CONFIG
+    type: primary
+    filesystem: ext4
+    size: 192MiB
+    input:
+      - filename: config-partition.tar.gz
+
+  - label: ROOT0
+    type: logical
+    filesystem: null
+    expand: true
+    block-size: 4kiB
+    input:
+      - filename: rootfs.ext4
+
+  - label: ROOT1
+    type: logical
+    filesystem: null
+    expand: true
+    block-size: 4kiB
+    input:
+      - filename: rootfs.ext4
+ChatGPT said:
+
+Thanks for sharing your RAUC/boot image layout. You’re using an msdos partition table with:
+
+    Dual boot partitions (BOOT0, BOOT1)
+
+    Dual rootfs partitions (ROOT0, ROOT1)
+
+    A dedicated CONFIG partition (ext4)
+
+    A bootloader (barebox.bin)
+
+This layout is perfect to implement persistent data preservation by making use of the CONFIG partition (or adding a new /data partition if needed). Here's how to proceed step-by-step:
+✅ GOAL
+
+Preserve changes made post-deployment (e.g., changed root password, updated ssh config, added files in /home, etc.) across rootfs updates via RAUC.
+✅ STRATEGY (based on your layout)
+🔹 Step 1 – Use the CONFIG partition for persistent storage
+
+Your CONFIG partition is already in ext4 format and is not overwritten during RAUC updates (it just gets untarred initially).
+
+Mount it persistently, e.g. at /config:
+
+mkdir -p /config
+mount /dev/mmcblkXpn /config   # Replace X and n with your actual device/partition
+
+You can do this via systemd mount unit or fstab.
+🔹 Step 2 – Overlay critical folders with persistent data
+
+To preserve changes to /etc, /home, /var, etc., use one of two methods:
+✅ OPTION A – Bind Mounting Specific Paths
+
+Bind mount specific folders:
+
+mkdir -p /config/etc /config/home
+mount --bind /config/etc /etc
+mount --bind /config/home /home
+
+You can do this via /etc/fstab:
+
+/dev/mmcblkXpn /config ext4 defaults 0 2
+/config/etc    /etc    none   bind     0 0
+/config/home   /home   none   bind     0 0
+
+    🧠 This ensures changes made to /etc or /home are stored in /config.
+
+✅ OPTION B – OverlayFS for /etc
+
+Create an overlayfs on top of /etc, keeping base config in rootfs, changes in /config/etc:
+
+Example:
+
+mkdir -p /config/etc /tmp/etc-overlay /mnt/etc-overlay
+
+mount -t overlay overlay -o lowerdir=/etc,upperdir=/config/etc,workdir=/tmp/etc-overlay /mnt/etc-overlay
+mount --move /mnt/etc-overlay /etc
+
+    🔁 Run this in an init script before services start (initramfs, early systemd unit, or init.d script).
+
+🔹 Step 3 – Automatically restore configs post-update (optional)
+
+If some files must be re-copied or re-symlinked after RAUC rootfs swap, use RAUC's post-install hook:
+
+/etc/rauc/hooks/post-install
+
+Example:
+
+#!/bin/sh
+echo "Post-install RAUC hook running"
+
+# Ensure /etc and /home are mounted from persistent location
+mount /config
+mount --bind /config/etc /etc
+mount --bind /config/home /home
+
+Mark it as executable:
+
+chmod +x /etc/rauc/hooks/post-install
+
+🔹 Step 4 – Avoid storing config files in rootfs at all
+
+To prevent your scripts from modifying /etc directly on the rootfs, have them write to /config or copy files there, and ensure that the system mounts/uses them on boot.
+✅ Optional – Add a dedicated /data partition if needed
+
+If CONFIG is small or reserved for something else, you can add a DATA partition to your layout:
+
+  - label: DATA
+    type: primary
+    filesystem: ext4
+    size: 512MiB
+
+And mount it at /data, using the same strategies as above.
+🧠 Final Advice
+Goal	Recommended Solution
+Preserve /etc changes	OverlayFS or bind mount /config/etc
+Preserve /home data	Bind mount /config/home
+Avoid losing data on update	Store everything in /config or /data
+Auto-reapply configs	RAUC post-install hook
+Avoid doing changes manually	Integrate as Yocto recipes or init scripts
+
+Would you like help writing a concrete systemd unit or fstab entry for this setup based on your partition device names (/dev/mmcblk...)?
+You said:
+but the post script do lot of changes and add sysmlink
+ChatGPT said:
+
+Thanks for the clarification — if your post-install script (or provisioning script) does a lot of changes, including creating symlinks, modifying configs, adding users, modifying /etc, etc., and you want to preserve all of those changes across future RAUC updates, then here’s the most robust approach you should follow:
+✅ GOAL REDEFINED
+
+You want to:
+
+    Run a big provisioning script once (that modifies /etc, sets up symlinks, creates folders, etc.)
+
+    Then freeze the result as a persistent state.
+
+    Later, when updating rootfs.ext4 with RAUC, you want all the customizations to survive — no need to re-run the script after every update.
+
+✅ BEST SOLUTION: Use OverlayFS + Persistent Upper Layer
+✔️ Concept
+
+You mount your rootfs (from RAUC) as the lower (read-only) layer, and have a persistent upper layer in /config (or /data) where all changes live.
+
+This way:
+
+    You can still update the rootfs (RAUC switches between ROOT0 and ROOT1).
+
+    All changes (files, symlinks, configs, even chmod/chown) are preserved in the upper layer.
+
+🔧 STEP-BY-STEP IMPLEMENTATION
+🔹 1. Create persistent config partition (you already have it)
+
+You're using an ext4 CONFIG partition, perfect.
+
+Let’s assume you mount it at /config.
+🔹 2. Provision the system once, run all your scripts
+
+Let your script make all changes after the first flash:
+
+# Example of one-time post-deployment script
+./provision.sh
+
+    Changes password, SSH config
+
+    Adds users
+
+    Symlinks /etc/myapp.conf to /opt/...
+
+    Creates folders in /home
+
+✅ Let it modify /etc, /home, etc. normally, this is fine for now.
+🔹 3. After provisioning: Create persistent overlay snapshot
+3a. Copy all modified dirs to /config
+
+mkdir -p /config/overlayfs/{etc,home,var,work}
+
+rsync -a /etc/ /config/overlayfs/etc/
+rsync -a /home/ /config/overlayfs/home/
+rsync -a /var/ /config/overlayfs/var/
+
+3b. (Optional) Tar it for later:
+
+tar czf /config/overlay_backup.tar.gz -C /config overlayfs
+
+🔹 4. Setup OverlayFS in early boot
+
+At early boot (e.g., systemd service or init script), mount overlay like:
+For /etc:
+
+mount -t overlay overlay -o lowerdir=/etc,upperdir=/config/overlayfs/etc,workdir=/config/overlayfs/work/etc /etc
+
+For /home:
+
+mount -t overlay overlay -o lowerdir=/home,upperdir=/config/overlayfs/home,workdir=/config/overlayfs/work/home /home
+
+For /var:
+
+mount -t overlay overlay -o lowerdir=/var,upperdir=/config/overlayfs/var,workdir=/config/overlayfs/work/var /var
+
+You can write a script like /etc/init.d/setup-overlays.sh or a systemd unit that runs before any services use those directories.
+🔹 5. Disable the provisioning script after first run
+
+Once the system is provisioned and changes are overlaid in /config, you don’t need the script anymore. On future boots (or after RAUC rootfs swap), your overlays will recreate the full state without re-executing anything.
+🛡️ Benefits
+
+    All symlinks, permissions, and file changes are preserved.
+
+    You can update your rootfs via RAUC (rootfs.ext4) safely.
+
+    No need to repeat scripts.
+
+    Changes are stored outside the A/B rootfs partitions.
+
+🧠 Alternative: Bake provisioning into Yocto (optional)
+
+If you know your provisioning script is always the same, you could:
+
+    Integrate it into your Yocto image (.bb recipe or post-process).
+
+    But if not, the OverlayFS solution is more dynamic and runtime-driven.
+
+✅ TL;DR Summary
+Challenge	Solution
+Preserve all provisioning changes	Use OverlayFS with persistent /config upperdir
+Changes include symlinks, configs, etc	Overlay preserves all file attrs
+Want it to survive RAUC updates	Yes, because /config is outside rootfs
+Only run script once	Yes, then just use overlay mount
+
+Would you like me to generate a sample systemd unit that mounts the overlays before any services start?
+You said:
+yes
+ChatGPT said:
+
+Great — below is a sample systemd unit to set up OverlayFS for /etc and /home using your /config partition as the persistent upper layer. This ensures that all changes from your provisioning script are preserved across RAUC rootfs updates.
+✅ Assumptions
+
+    Your persistent partition is mounted at /config
+
+    You have copied initial overlays (after provisioning) to:
+
+        /config/overlayfs/etc/
+
+        /config/overlayfs/home/
+
+        /config/overlayfs/work/etc/
+
+        /config/overlayfs/work/home/
+
+✅ 1. Script: /usr/local/bin/setup-overlays.sh
+
+#!/bin/sh
+set -e
+
+echo "[overlay-setup] Starting overlay setup"
+
+# Ensure workdirs exist
+mkdir -p /config/overlayfs/{etc,home}
+mkdir -p /config/overlayfs/work/{etc,home}
+
+# Mount overlay for /etc
+mount -t overlay overlay_etc -o \
+lowerdir=/etc,upperdir=/config/overlayfs/etc,workdir=/config/overlayfs/work/etc /etc
+
+# Mount overlay for /home
+mount -t overlay overlay_home -o \
+lowerdir=/home,upperdir=/config/overlayfs/home,workdir=/config/overlayfs/work/home /home
+
+echo "[overlay-setup] Overlay mounts complete"
+
+    🔧 Make sure it's executable:
+
+chmod +x /usr/local/bin/setup-overlays.sh
+
+✅ 2. systemd Unit: /etc/systemd/system/setup-overlays.service
+
+[Unit]
+Description=Setup OverlayFS for /etc and /home
+DefaultDependencies=no
+Before=sysinit.target
+Requires=local-fs.target
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/setup-overlays.sh
+RemainAfterExit=true
+
+[Install]
+WantedBy=sysinit.target
+
+✅ 3. Enable and Test
+
+systemctl daemon-reexec
+systemctl daemon-reload
+systemctl enable setup-overlays.service
+
+On next boot:
+
+    /etc and /home will be mounted as overlays.
+
+    All previous changes (users, passwords, configs, symlinks) will be preserved from /config/overlayfs.
+
+✅ Optional: Add mount unit for /config
+
+If /config is not mounted automatically, create this mount unit:
+
+# /etc/systemd/system/config.mount
+[Unit]
+Description=Mount config partition
+Before=setup-overlays.service
+
+[Mount]
+What=/dev/mmcblk0p3   # <- Replace with actual CONFIG partition
+Where=/config
+Type=ext4
+Options=defaults
+
+[Install]
+WantedBy=local-fs.target
+
+And enable it:
+
+systemctl enable config.mount
+
+✅ Final Note
+
+This approach works reliably across A/B rootfs switches with RAUC.
+
+If you need help detecting which rootfs is currently booted (to restore the right overlay), or extending to /var or others, I can help you with that too.
+
+Would you like a Yocto-compatible way to embed this systemd unit and script directly in your image?
+
+
+ChatGPT can make mistakes. Check important info. See Cookie Preferences.
